@@ -55,6 +55,21 @@ VEHICULOS_VALIDOS = [
     "V3",
 ]
 
+BODY_TYPE_OPTIONS = [
+    "General - Estacas",
+    "General - Furgon",
+    "General - Estibas",
+    "General - Plataforma",
+    "Portacontenedores",
+    "Furgon Refrigerado",
+    "Granel Solido - Estacas",
+    "Granel Solido - Furgon",
+    "Granel Solido - Volco",
+    "Granel Solido - Estibas",
+    "Granel Solido - Plataforma",
+    "Granel Liquido - Tanque",
+]
+
 CARROCERIA_ALIASES = {
     "GENERAL": "General - Estacas",
     "GENERAL ESTACAS": "General - Estacas",
@@ -97,7 +112,7 @@ CARROCERIA_ALIASES = {
     "GRANEL LIQUIDO TANQUE": "Granel Liquido - Tanque",
 }
 
-CARROCERIAS_VALIDAS = list(set(CARROCERIA_ALIASES.values()))
+CARROCERIAS_VALIDAS = BODY_TYPE_OPTIONS[:]
 
 VEHICULO_DESCRIPCIONES = {
     "C278": "camion rigido de 2 ejes",
@@ -125,6 +140,23 @@ CONVERSATION_STATE: dict[str, dict] = {}
 
 def utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def normalizar_lookup_texto(valor: str | None) -> str:
+    texto = str(valor or "").strip().upper()
+    texto = texto.replace("Á", "A").replace("É", "E").replace("Í", "I").replace("Ó", "O").replace("Ú", "U")
+    texto = re.sub(r"\s+", " ", texto)
+    return texto
+
+
+def normalizar_carroceria(texto: str | None) -> str | None:
+    if not texto:
+        return None
+    cleaned = re.sub(r"\s+", " ", texto).strip()
+    if not cleaned:
+        return None
+    normalized = normalizar_lookup_texto(cleaned)
+    return CARROCERIA_ALIASES.get(normalized) or cleaned
 
 
 def normalizar_ciudad(texto: str) -> str:
@@ -188,28 +220,37 @@ def parsear_ruta(texto: str) -> dict | None:
         texto,
     )
 
-    match = re.search(
-        r"(?:de\s+)?(.+?)\s+(?:a|hasta|->|→|–|-)\s+(.+)",
-        texto,
-    )
-    if not match:
-        return None
-
-    origen_raw = match.group(1).strip()
-    destino_raw = match.group(2).strip()
-
+    patterns = [
+        r"^(?:de\s+)?(.+?)\s+a\s+(.+)$",
+        r"^(?:de\s+)?(.+?)\s+para\s+(.+)$",
+        r"^(.+?)\s*->\s*(.+)$",
+        r"^(.+?)\s*-\s*(.+)$",
+    ]
     palabras_opcion = {"VACIO", "VACÍO", "CARGADO"}
-    destino_parts = destino_raw.split()
-    destino_clean = []
-    for part in destino_parts:
-        if part.upper() in VEHICULOS_VALIDOS or part.upper() in CARROCERIAS_VALIDAS or part.upper() in palabras_opcion:
-            break
-        destino_clean.append(part)
 
-    origen = normalizar_ciudad(" ".join(origen_raw.split()))
-    destino = normalizar_ciudad(" ".join(destino_clean))
-    if origen and destino:
-        return {"origen": origen, "destino": destino}
+    for pattern in patterns:
+        match = re.search(pattern, texto, re.IGNORECASE)
+        if not match:
+            continue
+
+        origen_raw = match.group(1).strip()
+        destino_raw = match.group(2).strip()
+
+        destino_parts = destino_raw.split()
+        destino_clean = []
+        for index in range(len(destino_parts)):
+            remaining = " ".join(destino_parts[index:])
+            part = destino_parts[index]
+            if part.upper() in VEHICULOS_VALIDOS or part.upper() in palabras_opcion:
+                break
+            if normalizar_carroceria(remaining) in CARROCERIAS_VALIDAS:
+                break
+            destino_clean.append(part)
+
+        origen = normalizar_ciudad(" ".join(origen_raw.split()))
+        destino = normalizar_ciudad(" ".join(destino_clean))
+        if origen and destino:
+            return {"origen": origen, "destino": destino}
     return None
 
 
@@ -222,9 +263,9 @@ def parsear_vehiculo(texto: str) -> str | None:
 
 
 def parsear_carroceria(texto: str) -> str | None:
-    texto_upper = texto.upper()
+    texto_normalizado = normalizar_lookup_texto(texto)
     for alias, canonical in CARROCERIA_ALIASES.items():
-        if alias in texto_upper:
+        if alias in texto_normalizado:
             return canonical
     return None
 
