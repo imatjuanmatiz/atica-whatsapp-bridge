@@ -1,5 +1,5 @@
 """
-ATICA WhatsApp Bridge v3.0
+ATICA WhatsApp Bridge v3.1
 Conecta WhatsApp Cloud API con la API SICETAC y, de forma opcional,
 con OpenAI para dar respuestas conversacionales.
 """
@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 
 from fastapi import FastAPI, Request, Response
 import requests
@@ -17,7 +18,7 @@ import requests
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("atica-whatsapp")
 
-app = FastAPI(title="ATICA WhatsApp Bridge", version="3.0.0")
+app = FastAPI(title="ATICA WhatsApp Bridge", version="3.1.0")
 
 
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "aticatoken123")
@@ -129,6 +130,14 @@ VEHICULO_DESCRIPCIONES = {
     "V3": "vehiculo liviano o configuracion especial segun la tabla base",
 }
 
+TONELADAS_REFERENCIA = {
+    "C3S3": 34.0,
+    "C3S2": 32.0,
+    "C2S3": 30.0,
+    "C2S2": 28.0,
+    "C3": 17.0,
+}
+
 LEAD_EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 LEAD_COMPANY_RE = re.compile(
     r"(?:empresa|compañ[ií]a|compania|transportadora|soy de|trabajo en)\s*[:\-]?\s*([A-Za-z0-9ÁÉÍÓÚÑáéíóúñ .,&-]{3,80})",
@@ -149,6 +158,12 @@ def normalizar_lookup_texto(valor: str | None) -> str:
     texto = texto.replace("Á", "A").replace("É", "E").replace("Í", "I").replace("Ó", "O").replace("Ú", "U")
     texto = re.sub(r"\s+", " ", texto)
     return texto
+
+
+def quitar_tildes(valor: str | None) -> str:
+    texto = str(valor or "")
+    texto = unicodedata.normalize("NFKD", texto)
+    return "".join(ch for ch in texto if not unicodedata.combining(ch))
 
 
 def normalizar_carroceria(texto: str | None) -> str | None:
@@ -175,6 +190,12 @@ def recortar_destino(destino_raw: str) -> str:
         if part.upper() in palabras_opcion:
             break
         if part.upper() in VEHICULOS_VALIDOS:
+            break
+        if re.match(r"^\d+(?:[.,]\d+)?$", part) and index + 1 < len(destino_parts):
+            siguiente = destino_parts[index + 1].upper()
+            if siguiente in {"HORA", "HORAS", "HR", "HRS", "H", "TON", "TONS", "TONELADA", "TONELADAS"}:
+                break
+        if part.upper() in {"HORA", "HORAS", "HR", "HRS", "H", "TON", "TONS", "TONELADA", "TONELADAS"}:
             break
         if normalizar_carroceria(remaining) in CARROCERIAS_VALIDAS:
             break
@@ -236,7 +257,8 @@ def normalizar_ciudad(texto: str) -> str:
 def parsear_ruta(texto: str) -> dict | None:
     texto = texto.strip().lower()
     texto = re.sub(
-        r"^(hola|buenos días|buenas tardes|buenas noches|buenas|consulta|consultar|"
+        r"^(valor por tonelada|por tonelada|cuanto por tonelada|cuánto por tonelada|valor por ton|por ton|"
+        r"hola|buenos días|buenas tardes|buenas noches|buenas|consulta|consultar|"
         r"ruta|flete|tarifa|cuanto cuesta|cuánto cuesta|precio|calcular|calcular ruta|"
         r"valor|costo|ahora|ok|bueno|entonces)\s*[,.:;]?\s*",
         "",
@@ -287,6 +309,42 @@ def parsear_modo_viaje(texto: str) -> str | None:
     return None
 
 
+def parsear_horas_personalizadas(texto: str) -> float | None:
+    match = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:horas|hora|hrs|hr|h)\b", texto, re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        return float(match.group(1).replace(",", "."))
+    except Exception:
+        return None
+
+
+def parsear_toneladas(texto: str) -> float | None:
+    match = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:toneladas|tonelada|tons|ton)\b", texto, re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        return float(match.group(1).replace(",", "."))
+    except Exception:
+        return None
+
+
+def usuario_pide_valor_por_tonelada(texto: str) -> bool:
+    texto_normalizado = normalizar_lookup_texto(texto)
+    return "POR TONELADA" in texto_normalizado or "VALOR TONELADA" in texto_normalizado or "VALOR POR TON" in texto_normalizado
+
+
+def usuario_pide_otra_hora(texto: str) -> bool:
+    texto_normalizado = normalizar_lookup_texto(texto)
+    return bool(parsear_horas_personalizadas(texto)) and (
+        "HORA" in texto_normalizado
+        or "CARGUE" in texto_normalizado
+        or "DESCARGUE" in texto_normalizado
+        or "PROCESO" in texto_normalizado
+        or "LOGIST" in texto_normalizado
+    )
+
+
 def usuario_pide_vacio(texto: str) -> bool:
     texto_lower = texto.lower()
     return "vacio" in texto_lower or "vacío" in texto_lower
@@ -311,9 +369,9 @@ def detectar_pregunta_configuracion(texto: str) -> str | None:
 def mensaje_configuracion_vehiculo(vehiculo: str) -> str:
     descripcion = VEHICULO_DESCRIPCIONES.get(vehiculo, "configuración vehicular SICETAC")
     return (
-        f"*{vehiculo}* corresponde a {descripcion}.\n\n"
-        "Si quieres, te calculo una ruta con esa configuración. "
-        "Escríbeme por ejemplo: _Bogotá a Barranquilla "
+        f"{vehiculo} corresponde a {quitar_tildes(descripcion)}.\n\n"
+        "Si quieres, te calculo una ruta con esa configuracion. "
+        "Escribeme por ejemplo: Bogota a Barranquilla "
         f"{vehiculo}_"
     )
 
@@ -339,56 +397,116 @@ def fmt_cop(valor) -> str:
         return str(valor)
 
 
-def formatear_respuesta(data: dict) -> str:
+def fmt_decimal(valor: float | int | None) -> str | None:
+    if valor is None:
+        return None
     try:
-        origen = data.get("origen", "?")
-        destino = data.get("destino", "?")
+        numero = float(valor)
+        if numero.is_integer():
+            return str(int(numero))
+        return f"{numero:.2f}".rstrip("0").rstrip(".")
+    except Exception:
+        return None
+
+
+def extraer_totales(data: dict | None) -> dict:
+    if not data:
+        return {}
+    if data.get("totales"):
+        return data.get("totales") or {}
+    variantes = data.get("variantes") or []
+    if len(variantes) == 1:
+        return variantes[0].get("totales") or {}
+    return {}
+
+
+def calcular_valor_hora_desde_totales(totales: dict | None) -> float | None:
+    if not totales:
+        return None
+    h2 = totales.get("H2")
+    h4 = totales.get("H4")
+    h8 = totales.get("H8")
+    try:
+        if h4 is not None and h8 is not None:
+            return (float(h8) - float(h4)) / 4.0
+        if h2 is not None and h4 is not None:
+            return (float(h4) - float(h2)) / 2.0
+    except Exception:
+        return None
+    return None
+
+
+def calcular_total_para_horas(data: dict | None, horas: float) -> float | None:
+    totales = extraer_totales(data)
+    if not totales:
+        return None
+    valor_hora = calcular_valor_hora_desde_totales(totales)
+    if valor_hora is None:
+        return None
+    try:
+        h8 = totales.get("H8")
+        if h8 is not None:
+            base_movilizacion = float(h8) - (8.0 * valor_hora)
+            return round(base_movilizacion + (float(horas) * valor_hora), 2)
+        h4 = totales.get("H4")
+        if h4 is not None:
+            base_movilizacion = float(h4) - (4.0 * valor_hora)
+            return round(base_movilizacion + (float(horas) * valor_hora), 2)
+        h2 = totales.get("H2")
+        if h2 is not None:
+            base_movilizacion = float(h2) - (2.0 * valor_hora)
+            return round(base_movilizacion + (float(horas) * valor_hora), 2)
+    except Exception:
+        return None
+    return None
+
+
+def formatear_respuesta(data: dict, *, include_closing: bool = True) -> str:
+    try:
+        origen = quitar_tildes(data.get("origen", "?"))
+        destino = quitar_tildes(data.get("destino", "?"))
         config = data.get("configuracion", "C3S3")
-        carroceria = data.get("carroceria", "GENERAL")
+        carroceria = quitar_tildes(data.get("carroceria", DEFAULT_CARROCERIA))
         mes = data.get("mes", "")
-        modo = data.get("modo_viaje", "CARGADO")
 
         lineas = [
-            f"📦 *Ruta:* {origen} → {destino}",
-            f"🚛 *Vehículo:* {config} | *Carrocería:* {carroceria}",
+            f"Ruta: {origen} a {destino}",
+            f"Configuracion: {config} | Carroceria: {carroceria}",
         ]
-
-        if modo != "CARGADO":
-            lineas.append(f"📋 *Modo:* {modo}")
-
-        lineas.append(f"📅 *Periodo:* {mes}")
+        if mes:
+            lineas.append(f"Periodo: {mes}")
 
         if "variantes" in data:
             variantes = data["variantes"]
-            lineas.append("")
-            lineas.append(f"*Se encontraron {len(variantes)} ruta(s):*")
+            lineas.append(f"Variantes encontradas: {len(variantes)}")
 
             for i, var in enumerate(variantes, 1):
-                nombre = var.get("NOMBRE_SICE", f"Ruta {i}")
+                nombre = quitar_tildes(var.get("NOMBRE_SICE", f"Ruta {i}"))
                 id_sice = var.get("ID_SICE", "")
                 tot = var.get("totales", {})
-
-                lineas.append("")
-                lineas.append(f"*{i}. {nombre}* (ID: {id_sice})")
+                etiqueta = f"{i}. {nombre}"
+                if id_sice:
+                    etiqueta += f" (ID {id_sice})"
+                lineas.append(etiqueta)
                 if tot.get("H2") is not None:
-                    lineas.append(f"   H2: {fmt_cop(tot.get('H2'))}")
+                    lineas.append(f"H2: {fmt_cop(tot.get('H2'))}")
                 if tot.get("H4") is not None:
-                    lineas.append(f"   H4: {fmt_cop(tot.get('H4'))}")
+                    lineas.append(f"H4: {fmt_cop(tot.get('H4'))}")
                 if tot.get("H8") is not None:
-                    lineas.append(f"   H8: {fmt_cop(tot.get('H8'))}")
+                    lineas.append(f"H8: {fmt_cop(tot.get('H8'))}")
         else:
             totales = data.get("totales", {})
-            lineas.append("")
-            lineas.append("*Valores de referencia SICETAC:*")
+            lineas.append("Valores SICETAC:")
             if totales.get("H2") is not None:
-                lineas.append(f"• H2: {fmt_cop(totales.get('H2'))} COP")
+                lineas.append(f"H2: {fmt_cop(totales.get('H2'))}")
             if totales.get("H4") is not None:
-                lineas.append(f"• H4: {fmt_cop(totales.get('H4'))} COP")
+                lineas.append(f"H4: {fmt_cop(totales.get('H4'))}")
             if totales.get("H8") is not None:
-                lineas.append(f"• H8: {fmt_cop(totales.get('H8'))} COP")
+                lineas.append(f"H8: {fmt_cop(totales.get('H8'))}")
 
-        lineas.append("")
-        lineas.append("_Fuente: SICETAC - Min. Transporte_")
+        if include_closing:
+            lineas.append("")
+            lineas.append("Escribe otra ruta asi: origen a destino.")
         return "\n".join(lineas)
     except Exception as e:
         logger.error(f"Error formateando: {e}")
@@ -397,30 +515,14 @@ def formatear_respuesta(data: dict) -> str:
 
 def mensaje_ayuda() -> str:
     return (
-        "👋 *¡Hola! Soy ATICA*, proyecto de *Atiemppo.com* para consultar rutas SICETAC.\n\n"
-        "Escríbeme la ruta directo en este formato: *origen a destino* y calcularemos la ruta.\n\n"
-        f"Si no indicas configuración o carrocería, uso por defecto *{DEFAULT_VEHICULO}* y *{DEFAULT_CARROCERIA}*.\n\n"
-        "*Ejemplos:*\n"
-        "• _Bogotá a Barranquilla_\n"
-        "• _De Medellín a Cartagena_\n"
-        "• _Cali - Buenaventura_\n\n"
-        "*Configuraciones disponibles:*\n"
-        "• _C278, C289, C2910, C2M10, C3, C2S2, C2S3, C3S2, C3S3, V3_\n\n"
-        "*Carrocerías soportadas:*\n"
-        "• _General - Estacas_\n"
-        "• _General - Furgon_\n"
-        "• _General - Estibas_\n"
-        "• _General - Plataforma_\n"
-        "• _Portacontenedores_\n"
-        "• _Furgon Refrigerado_\n"
-        "• _Granel Solido - Estacas_\n"
-        "• _Granel Solido - Furgon_\n"
-        "• _Granel Solido - Volco_\n"
-        "• _Granel Solido - Estibas_\n"
-        "• _Granel Solido - Plataforma_\n"
-        "• _Granel Liquido - Tanque_\n\n"
-        "Ejemplo avanzado: _Bogotá a Cali C3S3 portacontenedores_\n\n"
-        "Proyecto de *Atiemppo.com*. Si quieres, calcula otra ruta escribiéndola directo así: *origen a destino*."
+        "ATICA consulta rutas SICETAC.\n\n"
+        "Escribe la ruta directo asi: origen a destino.\n"
+        f"Si no indicas configuracion o carroceria, uso {DEFAULT_VEHICULO} y {quitar_tildes(DEFAULT_CARROCERIA)}.\n\n"
+        "Ejemplos:\n"
+        "- Bogota a Barranquilla\n"
+        "- Medellin a Cartagena C3S3\n"
+        "- Cali a Buenaventura portacontenedores\n\n"
+        "Proyecto de Atiemppo.com. Puedes calcular otra ruta escribiendo: origen a destino."
     )
 
 
@@ -447,6 +549,7 @@ def get_state(phone: str) -> dict:
                 "first_seen_at": utcnow_iso(),
             },
             "last_route": None,
+            "last_result": None,
         },
     )
 
@@ -476,11 +579,14 @@ def consultar_sicetac(
     vehiculo: str = None,
     carroceria: str = None,
     modo_viaje: str = None,
+    resumen: bool = True,
+    horas_logisticas: float | None = None,
+    tarifa_standby: float | None = None,
 ) -> dict | None:
     payload = {
         "origen": origen,
         "destino": destino,
-        "resumen": True,
+        "resumen": resumen,
     }
     if vehiculo:
         payload["vehiculo"] = vehiculo
@@ -488,6 +594,11 @@ def consultar_sicetac(
         payload["carroceria"] = carroceria
     if modo_viaje:
         payload["modo_viaje"] = modo_viaje
+    if horas_logisticas is not None:
+        payload["horas_logisticas"] = horas_logisticas
+        payload["horas_logisticas_personalizadas"] = horas_logisticas
+    if tarifa_standby is not None:
+        payload["tarifa_standby"] = tarifa_standby
 
     url = f"{SICETAC_API_BASE}/consulta"
     logger.info(f"SICETAC [{url}] payload: {payload}")
@@ -567,6 +678,79 @@ def build_sicetac_snapshot(data: dict | None) -> dict | None:
     }
 
 
+def resolver_toneladas_configuracion(vehiculo: str) -> float | None:
+    return TONELADAS_REFERENCIA.get((vehiculo or "").strip().upper())
+
+
+def formatear_valor_por_tonelada(
+    *,
+    resultado: dict,
+    vehiculo: str,
+    horas: float | None = None,
+    toneladas: float | None = None,
+) -> str:
+    toneladas_base = toneladas if toneladas is not None else resolver_toneladas_configuracion(vehiculo)
+    if not toneladas_base:
+        return (
+            "Puedo calcular el valor por tonelada, pero necesito la tonelada a usar.\n\n"
+            "Escribelo por ejemplo asi: Bogota a Barranquilla 12 toneladas."
+        )
+
+    total = None
+    etiqueta_horas = "H8"
+    if horas is not None:
+        total = calcular_total_para_horas(resultado, horas)
+        etiqueta_horas = f"{fmt_decimal(horas)}h"
+    if total is None:
+        total = extraer_totales(resultado).get("H8")
+        etiqueta_horas = "H8"
+    if total is None:
+        return "No pude calcular el valor por tonelada para esa ruta."
+
+    valor_ton = float(total) / float(toneladas_base)
+    origen = quitar_tildes(resultado.get("origen"))
+    destino = quitar_tildes(resultado.get("destino"))
+    toneladas_txt = fmt_decimal(toneladas_base) or str(toneladas_base)
+    return (
+        f"Ruta: {origen} a {destino}\n"
+        f"Configuracion: {vehiculo}\n"
+        f"Referencia usada: {etiqueta_horas} = {fmt_cop(total)}\n"
+        f"Toneladas: {toneladas_txt}\n"
+        f"Valor por tonelada: {fmt_cop(valor_ton)}\n\n"
+        "Escribe otra ruta asi: origen a destino."
+    )
+
+
+def formatear_valor_personalizado_por_horas(
+    *,
+    resultado: dict,
+    horas: float,
+    vehiculo: str,
+    toneladas: float | None = None,
+    incluir_por_tonelada: bool = False,
+) -> str:
+    total = calcular_total_para_horas(resultado, horas)
+    if total is None:
+        return "No pude calcular ese valor por horas con la informacion disponible."
+
+    origen = quitar_tildes(resultado.get("origen"))
+    destino = quitar_tildes(resultado.get("destino"))
+    horas_txt = fmt_decimal(horas) or str(horas)
+    lineas = [
+        f"Ruta: {origen} a {destino}",
+        f"Configuracion: {vehiculo}",
+        f"Valor SICETAC para {horas_txt} horas: {fmt_cop(total)}",
+    ]
+    if incluir_por_tonelada:
+        toneladas_base = toneladas if toneladas is not None else resolver_toneladas_configuracion(vehiculo)
+        if toneladas_base:
+            valor_ton = total / toneladas_base
+            lineas.append(f"Valor por tonelada: {fmt_cop(valor_ton)} usando {fmt_decimal(toneladas_base)} t")
+    lineas.append("")
+    lineas.append("Escribe otra ruta asi: origen a destino.")
+    return "\n".join(lineas)
+
+
 def capture_lead_event(payload: dict):
     if not LEAD_CAPTURE_WEBHOOK_URL:
         return
@@ -632,17 +816,17 @@ def generar_respuesta_ia(
     payload = {
         "model": OPENAI_MODEL,
         "instructions": (
-            "Eres ATICA, un asistente comercial y operativo por WhatsApp. "
-            "Responde en español de Colombia con tono cercano, concreto y profesional. "
+            "Eres ATICA, un asistente operativo por WhatsApp enfocado en calcular rutas SICETAC. "
+            "Responde en espanol de Colombia, corto, puntual y profesional. "
             "Nunca inventes valores SICETAC; usa solo lo que venga en el contexto. "
-            "Si el mensaje del usuario ya contiene una ruta razonablemente identificable, asumela y avanza sin pedir confirmaciones innecesarias. "
-            "Si hay resultado SICETAC, explícalo y luego sugiere el siguiente paso. "
+            "Tu prioridad es detectar la ruta o el calculo solicitado. "
+            "Si el mensaje ya contiene una ruta razonablemente identificable, asumela y avanza sin pedir confirmaciones innecesarias. "
+            "Si hay resultado SICETAC, devuelvelo de forma breve y luego invita a escribir otra ruta. "
             "Si falta la ruta, pide solo el dato faltante, no varios pasos a la vez. "
-            "Invita a escribir las rutas en formato directo 'origen a destino'. "
-            "Si faltan datos del lead, pide máximo un dato por turno entre nombre, empresa y correo. "
-            "Puedes usar fallback_reply como base, pero mejóralo para que suene conversacional. "
-            "No ofrezcas cotizacion formal. Al cierre, si aplica, recuerda que es un proyecto de Atiemppo.com e invita a calcular otra ruta. "
-            "No uses bloques de código. Máximo 900 caracteres."
+            "Usa fallback_reply como base y mantenlo sintetico. "
+            "No ofrezcas cotizacion formal. "
+            "No uses expresiones coloquiales como 'entiendo el lio'. "
+            "No uses bloques de codigo. Maximo 450 caracteres."
         ),
         "input": [
             {
@@ -684,11 +868,26 @@ def generar_respuesta_ia(
     return None
 
 
+def resolver_contexto_consulta(user_text: str, state: dict) -> tuple[dict | None, bool]:
+    ruta_detectada = parsear_ruta(user_text)
+    if ruta_detectada:
+        return ruta_detectada, True
+
+    requiere_contexto_anterior = usuario_pide_valor_por_tonelada(user_text) or usuario_pide_otra_hora(user_text)
+    if requiere_contexto_anterior and state.get("last_route"):
+        last_route = state["last_route"]
+        return {
+            "origen": last_route.get("origen"),
+            "destino": last_route.get("destino"),
+        }, False
+    return None, False
+
+
 @app.get("/")
 async def health():
     return {
         "service": "atica-whatsapp-bridge",
-        "version": "3.0.0",
+        "version": "3.1.0",
         "status": "running",
         "sicetac_api": SICETAC_API_BASE,
         "openai_enabled": bool(OPENAI_API_KEY),
@@ -745,17 +944,7 @@ async def receive_message(request: Request):
 
     texto_lower = user_text.lower().strip()
     if texto_lower in ("hola", "hi", "hello", "ayuda", "help", "menu", "menú", "inicio", "start", "?"):
-        fallback_reply = mensaje_ayuda()
-        respuesta = generar_respuesta_ia(
-            phone=from_number,
-            profile_name=profile_name,
-            user_text=user_text,
-            state=state,
-            ruta=None,
-            resultado_sicetac=None,
-            deterministic_reply=fallback_reply,
-        ) or fallback_reply
-        send_whatsapp_message(to=from_number, body=respuesta)
+        send_whatsapp_message(to=from_number, body=mensaje_ayuda())
         capture_lead_event(
             {
                 "event": "help_requested",
@@ -768,9 +957,8 @@ async def receive_message(request: Request):
 
     if usuario_pide_vacio(user_text):
         msg = (
-            "Por ahora este canal solo entrega valores *cargados*.\n\n"
-            "Si quieres, te calculo la ruta con una configuración y carrocería válidas. "
-            "Ejemplo: _Bogotá a Barranquilla C3S3 portacontenedores_."
+            "Por ahora este canal solo entrega valores cargados.\n\n"
+            "Escribe la ruta asi: Bogota a Barranquilla C3S3."
         )
         send_whatsapp_message(to=from_number, body=msg)
         capture_lead_event(
@@ -784,7 +972,7 @@ async def receive_message(request: Request):
         )
         return {"status": "unsupported vacio"}
 
-    ruta = parsear_ruta(user_text)
+    ruta, ruta_en_mensaje_actual = resolver_contexto_consulta(user_text, state)
     vehiculo_consultado = detectar_pregunta_configuracion(user_text)
     if vehiculo_consultado and not ruta:
         send_whatsapp_message(to=from_number, body=mensaje_configuracion_vehiculo(vehiculo_consultado))
@@ -801,11 +989,10 @@ async def receive_message(request: Request):
 
     if not ruta:
         fallback_reply = (
-            "No pude identificar bien la ruta todavía.\n\n"
-            "Escríbela directo así:\n"
-            "• _Bogotá a Barranquilla_\n"
-            "• _De Medellín a Cartagena_\n\n"
-            "Proyecto de *Atiemppo.com*. Si quieres, calcula otra ruta escribiéndola en formato *origen a destino*."
+            "No pude identificar la ruta.\n\n"
+            "Escribela directo asi:\n"
+            "Bogota a Barranquilla\n"
+            "Medellin a Cartagena"
         )
         respuesta = generar_respuesta_ia(
             phone=from_number,
@@ -828,9 +1015,13 @@ async def receive_message(request: Request):
         )
         return {"status": "no route parsed"}
 
-    vehiculo = parsear_vehiculo(user_text) or DEFAULT_VEHICULO
-    carroceria = parsear_carroceria(user_text) or DEFAULT_CARROCERIA
+    vehiculo = parsear_vehiculo(user_text) or (state.get("last_route") or {}).get("vehiculo") or DEFAULT_VEHICULO
+    carroceria = parsear_carroceria(user_text) or (state.get("last_route") or {}).get("carroceria") or DEFAULT_CARROCERIA
     modo_viaje = parsear_modo_viaje(user_text)
+    horas_personalizadas = parsear_horas_personalizadas(user_text)
+    toneladas_explicitas = parsear_toneladas(user_text)
+    pide_valor_ton = usuario_pide_valor_por_tonelada(user_text)
+    pide_horas = usuario_pide_otra_hora(user_text)
 
     resultado = consultar_sicetac(
         origen=ruta["origen"],
@@ -841,17 +1032,8 @@ async def receive_message(request: Request):
     )
 
     if resultado is None:
-        fallback_reply = "⚠️ No pude conectar con SICETAC en este momento. Intenta de nuevo en 1 minuto."
-        respuesta = generar_respuesta_ia(
-            phone=from_number,
-            profile_name=profile_name,
-            user_text=user_text,
-            state=state,
-            ruta=ruta,
-            resultado_sicetac=None,
-            deterministic_reply=fallback_reply,
-        ) or fallback_reply
-        send_whatsapp_message(to=from_number, body=respuesta)
+        fallback_reply = "No pude conectar con SICETAC en este momento. Intenta de nuevo en 1 minuto."
+        send_whatsapp_message(to=from_number, body=fallback_reply)
         return {"status": "sicetac timeout/error"}
 
     if resultado.get("_error"):
@@ -860,39 +1042,19 @@ async def receive_message(request: Request):
 
         if status == 404:
             msg = (
-                f"⚠️ No encontré la ruta *{ruta['origen']}* → *{ruta['destino']}*.\n\n"
-                "Verifica que los nombres de las ciudades/municipios sean correctos.\n"
-                "Escribe *ayuda* para ver ejemplos."
+                f"No encontre la ruta {quitar_tildes(ruta['origen'])} a {quitar_tildes(ruta['destino'])}.\n\n"
+                "Verifica los nombres y escribela otra vez en formato origen a destino."
             )
         elif status == 400:
-            msg = f"⚠️ Datos inválidos: {detail}"
+            msg = f"Datos invalidos: {quitar_tildes(detail)}"
         else:
-            msg = "⚠️ Error en el servidor SICETAC. Intenta de nuevo en unos minutos."
-
-        respuesta = generar_respuesta_ia(
-            phone=from_number,
-            profile_name=profile_name,
-            user_text=user_text,
-            state=state,
-            ruta=ruta,
-            resultado_sicetac=None,
-            deterministic_reply=msg,
-        ) or msg
-        send_whatsapp_message(to=from_number, body=respuesta)
+            msg = "Error en el servidor SICETAC. Intenta de nuevo en unos minutos."
+        send_whatsapp_message(to=from_number, body=msg)
         return {"status": "sicetac api error", "code": status, "detail": detail}
 
     if "error" in resultado and not resultado.get("totales") and not resultado.get("variantes"):
-        fallback_reply = f"⚠️ {resultado.get('error', 'Error desconocido')}"
-        respuesta = generar_respuesta_ia(
-            phone=from_number,
-            profile_name=profile_name,
-            user_text=user_text,
-            state=state,
-            ruta=ruta,
-            resultado_sicetac=None,
-            deterministic_reply=fallback_reply,
-        ) or fallback_reply
-        send_whatsapp_message(to=from_number, body=respuesta)
+        fallback_reply = quitar_tildes(resultado.get("error", "Error desconocido"))
+        send_whatsapp_message(to=from_number, body=fallback_reply)
         return {"status": "sicetac body error", "detail": resultado.get("error")}
 
     state["last_route"] = {
@@ -903,17 +1065,27 @@ async def receive_message(request: Request):
         "modo_viaje": modo_viaje,
         "consulted_at": utcnow_iso(),
     }
+    state["last_result"] = resultado
 
     respuesta_deterministica = formatear_respuesta(resultado)
-    respuesta = generar_respuesta_ia(
-        phone=from_number,
-        profile_name=profile_name,
-        user_text=user_text,
-        state=state,
-        ruta=ruta,
-        resultado_sicetac=resultado,
-        deterministic_reply=respuesta_deterministica,
-    ) or respuesta_deterministica
+    respuesta = respuesta_deterministica
+    if pide_horas and horas_personalizadas is not None:
+        respuesta = formatear_valor_personalizado_por_horas(
+            resultado=resultado,
+            horas=horas_personalizadas,
+            vehiculo=vehiculo,
+            toneladas=toneladas_explicitas,
+            incluir_por_tonelada=pide_valor_ton,
+        )
+    elif pide_valor_ton:
+        respuesta = formatear_valor_por_tonelada(
+            resultado=resultado,
+            vehiculo=vehiculo,
+            horas=horas_personalizadas if pide_horas else None,
+            toneladas=toneladas_explicitas,
+        )
+    elif not ruta_en_mensaje_actual and (pide_horas or pide_valor_ton):
+        respuesta = respuesta_deterministica
     send_whatsapp_message(to=from_number, body=respuesta)
 
     capture_lead_event(
