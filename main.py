@@ -515,7 +515,7 @@ def formatear_respuesta(data: dict, *, include_closing: bool = True) -> str:
 
 def mensaje_ayuda() -> str:
     return (
-        "ATICA consulta rutas SICETAC.\n\n"
+        "Hola Soy Atica de Atiemppo ahora en Whatsapp!, estoy aca para proporcionarte la informacion de SICETAC al instante y en tu telefono.\n\n"
         "Escribe la ruta directo asi: origen a destino.\n"
         "Si quieres ver configuraciones y carrocerias disponibles, escribe: opciones.\n"
         f"Si no indicas configuracion o carroceria, uso {DEFAULT_VEHICULO} y {quitar_tildes(DEFAULT_CARROCERIA)}.\n\n"
