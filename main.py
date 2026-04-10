@@ -54,6 +54,8 @@ VEHICULOS_VALIDOS = [
     "C3S3",
     "V3",
 ]
+DEFAULT_VEHICULO = "C3S3"
+DEFAULT_CARROCERIA = "General - Estacas"
 
 BODY_TYPE_OPTIONS = [
     "General - Estacas",
@@ -256,7 +258,7 @@ def parsear_ruta(texto: str) -> dict | None:
 
 def parsear_vehiculo(texto: str) -> str | None:
     texto_upper = texto.upper()
-    for vehiculo in VEHICULOS_VALIDOS:
+    for vehiculo in sorted(VEHICULOS_VALIDOS, key=len, reverse=True):
         if vehiculo in texto_upper:
             return vehiculo
     return None
@@ -281,7 +283,14 @@ def usuario_pide_vacio(texto: str) -> bool:
 
 def detectar_pregunta_configuracion(texto: str) -> str | None:
     texto_upper = texto.upper()
-    if "VEHICULO" in texto_upper or "VEHÍCULO" in texto_upper or "CONFIGURACION" in texto_upper or "CONFIGURACIÓN" in texto_upper:
+    if (
+        "QUE ES" in texto_upper
+        or "QUÉ ES" in texto_upper
+        or "QUE SIGNIFICA" in texto_upper
+        or "QUÉ SIGNIFICA" in texto_upper
+        or "TIPO DE VEHICULO" in texto_upper
+        or "TIPO DE VEHÍCULO" in texto_upper
+    ):
         for vehiculo in VEHICULOS_VALIDOS:
             if vehiculo in texto_upper:
                 return vehiculo
@@ -379,6 +388,7 @@ def mensaje_ayuda() -> str:
     return (
         "👋 *¡Hola! Soy ATICA*, tu asistente de consulta SICETAC.\n\n"
         "Escríbeme una ruta y te doy los valores de referencia cargados del Ministerio de Transporte.\n\n"
+        f"Si no indicas configuración o carrocería, uso por defecto *{DEFAULT_VEHICULO}* y *{DEFAULT_CARROCERIA}*.\n\n"
         "*Ejemplos:*\n"
         "• _Bogotá a Barranquilla_\n"
         "• _De Medellín a Cartagena_\n"
@@ -760,8 +770,9 @@ async def receive_message(request: Request):
         )
         return {"status": "unsupported vacio"}
 
+    ruta = parsear_ruta(user_text)
     vehiculo_consultado = detectar_pregunta_configuracion(user_text)
-    if vehiculo_consultado:
+    if vehiculo_consultado and not ruta:
         send_whatsapp_message(to=from_number, body=mensaje_configuracion_vehiculo(vehiculo_consultado))
         capture_lead_event(
             {
@@ -774,7 +785,6 @@ async def receive_message(request: Request):
         )
         return {"status": "vehicle info sent"}
 
-    ruta = parsear_ruta(user_text)
     if not ruta:
         fallback_reply = (
             "No pude identificar la ruta. 🤔\n\n"
@@ -804,8 +814,8 @@ async def receive_message(request: Request):
         )
         return {"status": "no route parsed"}
 
-    vehiculo = parsear_vehiculo(user_text)
-    carroceria = parsear_carroceria(user_text)
+    vehiculo = parsear_vehiculo(user_text) or DEFAULT_VEHICULO
+    carroceria = parsear_carroceria(user_text) or DEFAULT_CARROCERIA
     modo_viaje = parsear_modo_viaje(user_text)
 
     resultado = consultar_sicetac(
