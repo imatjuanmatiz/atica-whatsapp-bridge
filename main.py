@@ -1052,13 +1052,17 @@ async def receive_message(request: Request):
         )
         return {"status": "no route parsed"}
 
-    vehiculo = parsear_vehiculo(user_text) or (state.get("last_route") or {}).get("vehiculo") or DEFAULT_VEHICULO
-    carroceria = parsear_carroceria(user_text) or (state.get("last_route") or {}).get("carroceria") or DEFAULT_CARROCERIA
+    vehiculo_detectado = parsear_vehiculo(user_text)
+    carroceria_detectada = parsear_carroceria(user_text)
+    vehiculo = vehiculo_detectado or (state.get("last_route") or {}).get("vehiculo") or DEFAULT_VEHICULO
+    carroceria = carroceria_detectada or (state.get("last_route") or {}).get("carroceria") or DEFAULT_CARROCERIA
     modo_viaje = parsear_modo_viaje(user_text)
     horas_personalizadas = parsear_horas_personalizadas(user_text)
     toneladas_explicitas = parsear_toneladas(user_text)
     pide_valor_ton = usuario_pide_valor_por_tonelada(user_text)
     pide_horas = usuario_pide_otra_hora(user_text)
+    uso_default_vehiculo = vehiculo_detectado is None and not (state.get("last_route") or {}).get("vehiculo")
+    uso_default_carroceria = carroceria_detectada is None and not (state.get("last_route") or {}).get("carroceria")
 
     resultado = consultar_sicetac(
         origen=ruta["origen"],
@@ -1106,6 +1110,9 @@ async def receive_message(request: Request):
 
     respuesta_deterministica = formatear_respuesta(resultado)
     respuesta = respuesta_deterministica
+    query_kind = "route_summary"
+    total_referencia = extraer_totales(resultado).get("H8")
+    total_bucket = "H8" if total_referencia is not None else None
     if pide_horas and horas_personalizadas is not None:
         respuesta = formatear_valor_personalizado_por_horas(
             resultado=resultado,
@@ -1114,6 +1121,9 @@ async def receive_message(request: Request):
             toneladas=toneladas_explicitas,
             incluir_por_tonelada=pide_valor_ton,
         )
+        query_kind = "custom_hours"
+        total_referencia = calcular_total_para_horas(resultado, horas_personalizadas)
+        total_bucket = f"H{fmt_decimal(horas_personalizadas) or horas_personalizadas}"
     elif pide_valor_ton:
         respuesta = formatear_valor_por_tonelada(
             resultado=resultado,
@@ -1121,6 +1131,10 @@ async def receive_message(request: Request):
             horas=horas_personalizadas if pide_horas else None,
             toneladas=toneladas_explicitas,
         )
+        query_kind = "value_per_ton"
+        if horas_personalizadas is not None:
+            total_referencia = calcular_total_para_horas(resultado, horas_personalizadas)
+            total_bucket = f"H{fmt_decimal(horas_personalizadas) or horas_personalizadas}"
     elif not ruta_en_mensaje_actual and (pide_horas or pide_valor_ton):
         respuesta = respuesta_deterministica
     send_whatsapp_message(to=from_number, body=respuesta)
@@ -1134,6 +1148,17 @@ async def receive_message(request: Request):
             "route": state["last_route"],
             "sicetac": build_sicetac_snapshot(resultado),
             "message": user_text,
+            "query": {
+                "kind": query_kind,
+                "requested_hours": horas_personalizadas,
+                "requested_tons": toneladas_explicitas,
+                "value_per_ton_requested": pide_valor_ton,
+                "used_last_route_context": not ruta_en_mensaje_actual,
+                "used_default_vehicle": uso_default_vehiculo,
+                "used_default_body_type": uso_default_carroceria,
+                "sicetac_reference_total": total_referencia,
+                "sicetac_reference_bucket": total_bucket,
+            },
         }
     )
 
