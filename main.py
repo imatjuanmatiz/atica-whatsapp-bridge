@@ -268,6 +268,7 @@ def parsear_ruta(texto: str) -> dict | None:
     patterns = [
         r"^(?:de\s+)?(.+?)\s+a\s+(.+)$",
         r"^(?:de\s+)?(.+?)\s+para\s+(.+)$",
+        r"^(?:de\s+)?(.+?)\s+hasta\s+(.+)$",
         r"^(.+?)\s*->\s*(.+)$",
         r"^(.+?)\s*-\s*(.+)$",
         r"^entre\s+(.+?)\s+y\s+(.+)$",
@@ -1031,16 +1032,7 @@ async def receive_message(request: Request):
             "Bogota a Barranquilla\n"
             "Medellin a Cartagena"
         )
-        respuesta = generar_respuesta_ia(
-            phone=from_number,
-            profile_name=profile_name,
-            user_text=user_text,
-            state=state,
-            ruta=None,
-            resultado_sicetac=None,
-            deterministic_reply=fallback_reply,
-        ) or fallback_reply
-        send_whatsapp_message(to=from_number, body=respuesta)
+        send_whatsapp_message(to=from_number, body=fallback_reply)
         capture_lead_event(
             {
                 "event": "message_without_route",
