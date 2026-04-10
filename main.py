@@ -1046,15 +1046,23 @@ async def receive_message(request: Request):
 
     vehiculo_detectado = parsear_vehiculo(user_text)
     carroceria_detectada = parsear_carroceria(user_text)
-    vehiculo = vehiculo_detectado or (state.get("last_route") or {}).get("vehiculo") or DEFAULT_VEHICULO
-    carroceria = carroceria_detectada or (state.get("last_route") or {}).get("carroceria") or DEFAULT_CARROCERIA
+    if ruta_en_mensaje_actual:
+        vehiculo = vehiculo_detectado or DEFAULT_VEHICULO
+        carroceria = carroceria_detectada or DEFAULT_CARROCERIA
+    else:
+        vehiculo = vehiculo_detectado or (state.get("last_route") or {}).get("vehiculo") or DEFAULT_VEHICULO
+        carroceria = carroceria_detectada or (state.get("last_route") or {}).get("carroceria") or DEFAULT_CARROCERIA
     modo_viaje = parsear_modo_viaje(user_text)
     horas_personalizadas = parsear_horas_personalizadas(user_text)
     toneladas_explicitas = parsear_toneladas(user_text)
     pide_valor_ton = usuario_pide_valor_por_tonelada(user_text)
     pide_horas = usuario_pide_otra_hora(user_text)
-    uso_default_vehiculo = vehiculo_detectado is None and not (state.get("last_route") or {}).get("vehiculo")
-    uso_default_carroceria = carroceria_detectada is None and not (state.get("last_route") or {}).get("carroceria")
+    uso_default_vehiculo = vehiculo_detectado is None and (
+        ruta_en_mensaje_actual or not (state.get("last_route") or {}).get("vehiculo")
+    )
+    uso_default_carroceria = carroceria_detectada is None and (
+        ruta_en_mensaje_actual or not (state.get("last_route") or {}).get("carroceria")
+    )
 
     resultado = consultar_sicetac(
         origen=ruta["origen"],
