@@ -238,7 +238,7 @@ def parsear_ruta(texto: str) -> dict | None:
     texto = re.sub(
         r"^(hola|buenos días|buenas tardes|buenas noches|buenas|consulta|consultar|"
         r"ruta|flete|tarifa|cuanto cuesta|cuánto cuesta|precio|calcular|calcular ruta|"
-        r"valor|costo)\s*[,.:;]?\s*",
+        r"valor|costo|ahora|ok|bueno|entonces)\s*[,.:;]?\s*",
         "",
         texto,
     )
@@ -397,8 +397,8 @@ def formatear_respuesta(data: dict) -> str:
 
 def mensaje_ayuda() -> str:
     return (
-        "👋 *¡Hola! Soy ATICA*, tu asistente de consulta SICETAC.\n\n"
-        "Escríbeme una ruta y te doy los valores de referencia cargados del Ministerio de Transporte.\n\n"
+        "👋 *¡Hola! Soy ATICA*, proyecto de *Atiemppo.com* para consultar rutas SICETAC.\n\n"
+        "Escríbeme la ruta directo en este formato: *origen a destino* y calcularemos la ruta.\n\n"
         f"Si no indicas configuración o carrocería, uso por defecto *{DEFAULT_VEHICULO}* y *{DEFAULT_CARROCERIA}*.\n\n"
         "*Ejemplos:*\n"
         "• _Bogotá a Barranquilla_\n"
@@ -420,7 +420,7 @@ def mensaje_ayuda() -> str:
         "• _Granel Solido - Plataforma_\n"
         "• _Granel Liquido - Tanque_\n\n"
         "Ejemplo avanzado: _Bogotá a Cali C3S3 portacontenedores_\n\n"
-        "Escribe *ayuda* en cualquier momento."
+        "Proyecto de *Atiemppo.com*. Si quieres, calcula otra ruta escribiéndola directo así: *origen a destino*."
     )
 
 
@@ -635,10 +635,13 @@ def generar_respuesta_ia(
             "Eres ATICA, un asistente comercial y operativo por WhatsApp. "
             "Responde en español de Colombia con tono cercano, concreto y profesional. "
             "Nunca inventes valores SICETAC; usa solo lo que venga en el contexto. "
+            "Si el mensaje del usuario ya contiene una ruta razonablemente identificable, asumela y avanza sin pedir confirmaciones innecesarias. "
             "Si hay resultado SICETAC, explícalo y luego sugiere el siguiente paso. "
-            "Si falta la ruta, pide solo el dato faltante. "
+            "Si falta la ruta, pide solo el dato faltante, no varios pasos a la vez. "
+            "Invita a escribir las rutas en formato directo 'origen a destino'. "
             "Si faltan datos del lead, pide máximo un dato por turno entre nombre, empresa y correo. "
             "Puedes usar fallback_reply como base, pero mejóralo para que suene conversacional. "
+            "No ofrezcas cotizacion formal. Al cierre, si aplica, recuerda que es un proyecto de Atiemppo.com e invita a calcular otra ruta. "
             "No uses bloques de código. Máximo 900 caracteres."
         ),
         "input": [
@@ -798,11 +801,11 @@ async def receive_message(request: Request):
 
     if not ruta:
         fallback_reply = (
-            "No pude identificar la ruta. 🤔\n\n"
-            "Escríbela así:\n"
+            "No pude identificar bien la ruta todavía.\n\n"
+            "Escríbela directo así:\n"
             "• _Bogotá a Barranquilla_\n"
             "• _De Medellín a Cartagena_\n\n"
-            "Escribe *ayuda* para más opciones."
+            "Proyecto de *Atiemppo.com*. Si quieres, calcula otra ruta escribiéndola en formato *origen a destino*."
         )
         respuesta = generar_respuesta_ia(
             phone=from_number,
