@@ -526,6 +526,20 @@ def mensaje_ayuda() -> str:
     )
 
 
+def mensaje_opciones() -> str:
+    return (
+        "Configuraciones: C278, C289, C2910, C2M10, C3, C2S2, C2S3, C3S2, C3S3 y V3.\n\n"
+        "Carrocerias: General - Estacas, General - Furgon, General - Estibas, General - Plataforma, "
+        "Portacontenedores, Furgon Refrigerado, Granel Solido - Estacas, Granel Solido - Furgon, "
+        "Granel Solido - Volco, Granel Solido - Estibas, Granel Solido - Plataforma y Granel Liquido - Tanque.\n\n"
+        f"Si no indicas una, uso {DEFAULT_VEHICULO} y {quitar_tildes(DEFAULT_CARROCERIA)}.\n\n"
+        "Ejemplos:\n"
+        "- Bogota a Barranquilla\n"
+        "- Medellin a Cartagena C3S3\n"
+        "- Cali a Buenaventura portacontenedores"
+    )
+
+
 def get_contact_name(value: dict) -> str | None:
     contacts = value.get("contacts") or []
     if not contacts:
@@ -954,6 +968,18 @@ async def receive_message(request: Request):
             }
         )
         return {"status": "help sent"}
+
+    if texto_lower in ("opciones", "configuraciones", "vehiculos", "vehículos", "carrocerias", "carrocerias", "menu opciones"):
+        send_whatsapp_message(to=from_number, body=mensaje_opciones())
+        capture_lead_event(
+            {
+                "event": "options_requested",
+                "ts": utcnow_iso(),
+                "channel": "whatsapp",
+                "lead": state["lead"],
+            }
+        )
+        return {"status": "options sent"}
 
     if usuario_pide_vacio(user_text):
         msg = (
