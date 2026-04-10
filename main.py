@@ -523,7 +523,7 @@ def mensaje_ayuda() -> str:
         "- Bogota a Barranquilla\n"
         "- Medellin a Cartagena C3S3\n"
         "- Cali a Buenaventura portacontenedores\n\n"
-        "Proyecto de Atiemppo.com. Puedes calcular otra ruta escribiendo: origen a destino."
+        "Escribe la ruta que quieres que analicemos hoy."
     )
 
 
