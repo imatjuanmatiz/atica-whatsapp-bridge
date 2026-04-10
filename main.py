@@ -161,6 +161,27 @@ def normalizar_carroceria(texto: str | None) -> str | None:
     return CARROCERIA_ALIASES.get(normalized) or cleaned
 
 
+def limpiar_fragmento_ruta(texto: str) -> str:
+    return re.sub(r"^[,.;:\s]+|[,.;:\s]+$", "", texto or "").strip()
+
+
+def recortar_destino(destino_raw: str) -> str:
+    palabras_opcion = {"VACIO", "VACÍO", "CARGADO"}
+    destino_parts = destino_raw.split()
+    destino_clean = []
+    for index in range(len(destino_parts)):
+        remaining = " ".join(destino_parts[index:])
+        part = destino_parts[index]
+        if part.upper() in palabras_opcion:
+            break
+        if part.upper() in VEHICULOS_VALIDOS:
+            break
+        if normalizar_carroceria(remaining) in CARROCERIAS_VALIDAS:
+            break
+        destino_clean.append(part)
+    return " ".join(destino_clean).strip()
+
+
 def normalizar_ciudad(texto: str) -> str:
     texto = texto.strip().title()
     alias = {
@@ -227,30 +248,20 @@ def parsear_ruta(texto: str) -> dict | None:
         r"^(?:de\s+)?(.+?)\s+para\s+(.+)$",
         r"^(.+?)\s*->\s*(.+)$",
         r"^(.+?)\s*-\s*(.+)$",
+        r"^entre\s+(.+?)\s+y\s+(.+)$",
+        r"^origen\s+(.+?)\s+destino\s+(.+)$",
+        r"^origen[:\s]+(.+?)\s+destino[:\s]+(.+)$",
     ]
-    palabras_opcion = {"VACIO", "VACÍO", "CARGADO"}
 
     for pattern in patterns:
         match = re.search(pattern, texto, re.IGNORECASE)
         if not match:
             continue
 
-        origen_raw = match.group(1).strip()
-        destino_raw = match.group(2).strip()
-
-        destino_parts = destino_raw.split()
-        destino_clean = []
-        for index in range(len(destino_parts)):
-            remaining = " ".join(destino_parts[index:])
-            part = destino_parts[index]
-            if part.upper() in VEHICULOS_VALIDOS or part.upper() in palabras_opcion:
-                break
-            if normalizar_carroceria(remaining) in CARROCERIAS_VALIDAS:
-                break
-            destino_clean.append(part)
-
+        origen_raw = limpiar_fragmento_ruta(match.group(1))
+        destino_raw = limpiar_fragmento_ruta(match.group(2))
         origen = normalizar_ciudad(" ".join(origen_raw.split()))
-        destino = normalizar_ciudad(" ".join(destino_clean))
+        destino = normalizar_ciudad(recortar_destino(destino_raw))
         if origen and destino:
             return {"origen": origen, "destino": destino}
     return None
