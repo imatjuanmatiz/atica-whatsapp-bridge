@@ -145,6 +145,41 @@ TONELADAS_REFERENCIA = {
     "C3": 17.0,
 }
 
+INTENT_PATTERNS = [
+    "quiero que me traigas el valor del flete de",
+    "quiero que me traigas el valor del flete",
+    "quiero saber el valor a pagar de",
+    "quiero saber el valor del viaje de",
+    "quiero saber el valor del viaje",
+    "quiero saber el costo de la ruta",
+    "quiero saber el costo de",
+    "quiero saber el precio de",
+    "quiero saber el precio",
+    "calcula el valor de la ruta",
+    "calcula el valor del flete de",
+    "calcula el valor del flete",
+    "trae el valor del flete de",
+    "trae del valor del flete de",
+    "trae el valor del flete",
+    "cual es el valor a pagar de",
+    "cual es el valor del viaje de",
+    "cual es el valor del viaje",
+    "cual es el costo de la ruta",
+    "cual es el costo de",
+    "cuentame el costo de",
+    "genera el costo de",
+    "dime el costo de la ruta",
+    "dime el costo de",
+    "dime el valor de",
+    "precio de",
+    "valor de",
+    "costo de",
+    "costo",
+    "precio",
+    "valor",
+    "necesito",
+]
+
 LEAD_EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 LEAD_COMPANY_RE = re.compile(
     r"(?:empresa|compañ[ií]a|compania|transportadora|soy de|trabajo en)\s*[:\-]?\s*([A-Za-z0-9ÁÉÍÓÚÑáéíóúñ .,&-]{3,80})",
@@ -201,6 +236,16 @@ def normalizar_texto_libre(valor: str | None) -> str:
     texto = re.sub(r"[^A-Z0-9\s]", " ", texto)
     texto = re.sub(r"\s+", " ", texto).strip()
     return texto
+
+
+def strip_intent_prefixes(texto: str) -> tuple[str, str | None]:
+    cleaned = re.sub(r"\s+", " ", (texto or "").strip())
+    lowered = quitar_tildes(cleaned).lower()
+    for pattern in sorted(INTENT_PATTERNS, key=len, reverse=True):
+        if lowered.startswith(pattern):
+            remainder = cleaned[len(pattern):].strip(" ,.:;-")
+            return remainder or cleaned, pattern
+    return cleaned, None
 
 
 def get_municipios_endpoint() -> str:
@@ -393,7 +438,8 @@ def normalizar_ciudad(texto: str) -> str:
 
 
 def parsear_ruta(texto: str) -> dict | None:
-    texto = texto.strip().lower()
+    texto_base, _ = strip_intent_prefixes(texto)
+    texto = texto_base.strip().lower()
     texto = re.sub(
         r"^(valor por tonelada|por tonelada|cuanto por tonelada|cuánto por tonelada|valor por ton|por ton|"
         r"hola|buenos días|buenas tardes|buenas noches|buenas|consulta|consultar|"
@@ -435,6 +481,27 @@ def parsear_ruta(texto: str) -> dict | None:
                 ruta["codigo_dane_destino"] = destino_resuelto.get("codigo_dane")
             return ruta
     return inferir_ruta_con_municipios(texto)
+
+
+def analizar_texto_busqueda(texto: str) -> dict:
+    cleaned_text, matched_intent = strip_intent_prefixes(texto)
+    ruta = parsear_ruta(cleaned_text)
+    municipios = extraer_municipios_en_texto(cleaned_text)
+    return {
+        "original_text": texto,
+        "cleaned_text": cleaned_text,
+        "matched_intent_pattern": matched_intent,
+        "municipios_detected": [
+            {
+                "codigo_dane": item.get("codigo_dane"),
+                "nombre_oficial": item.get("nombre_oficial"),
+                "departamento": item.get("departamento"),
+            }
+            for item in municipios[:4]
+        ],
+        "route_found": bool(ruta),
+        "route": ruta,
+    }
 
 
 def parsear_vehiculo(texto: str) -> str | None:
@@ -1180,7 +1247,8 @@ async def receive_message(request: Request):
         )
         return {"status": "unsupported vacio"}
 
-    ruta, ruta_en_mensaje_actual = resolver_contexto_consulta(user_text, state)
+    analisis_busqueda = analizar_texto_busqueda(user_text)
+    ruta, ruta_en_mensaje_actual = resolver_contexto_consulta(analisis_busqueda.get("cleaned_text") or user_text, state)
     vehiculo_consultado = detectar_pregunta_configuracion(user_text)
     if vehiculo_consultado and not ruta:
         send_whatsapp_message(to=from_number, body=mensaje_configuracion_vehiculo(vehiculo_consultado))
@@ -1210,6 +1278,7 @@ async def receive_message(request: Request):
                 "channel": "whatsapp",
                 "lead": state["lead"],
                 "message": user_text,
+                "parse": analisis_busqueda,
             }
         )
         return {"status": "no route parsed"}
@@ -1320,6 +1389,7 @@ async def receive_message(request: Request):
             "route": state["last_route"],
             "sicetac": build_sicetac_snapshot(resultado),
             "message": user_text,
+            "parse": analisis_busqueda,
             "query": {
                 "kind": query_kind,
                 "requested_hours": horas_personalizadas,
