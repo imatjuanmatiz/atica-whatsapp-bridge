@@ -33,6 +33,7 @@ if SICETAC_API_BASE.endswith("/consulta"):
     SICETAC_API_BASE = SICETAC_API_BASE.replace("/consulta", "")
 
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT_MS", "30000")) / 1000
+MUNICIPIOS_CACHE_TTL_SECONDS = int(os.environ.get("MUNICIPIOS_CACHE_TTL_SECONDS", "3600"))
 
 OPENAI_API_KEY = (os.environ.get("OPENAI_API_KEY") or "").strip()
 OPENAI_MODEL = (os.environ.get("OPENAI_MODEL") or "gpt-5-mini").strip()
@@ -147,10 +148,19 @@ LEAD_COMPANY_RE = re.compile(
 # Estado liviano por teléfono. Es efímero, pero mejora la conversación
 # sin agregar una dependencia obligatoria de persistencia.
 CONVERSATION_STATE: dict[str, dict] = {}
+MUNICIPIOS_CACHE: dict[str, object] = {
+    "loaded_at": None,
+    "aliases": {},
+    "ordered_aliases": [],
+}
 
 
 def utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def normalizar_lookup_texto(valor: str | None) -> str:
@@ -178,6 +188,128 @@ def normalizar_carroceria(texto: str | None) -> str | None:
 
 def limpiar_fragmento_ruta(texto: str) -> str:
     return re.sub(r"^[,.;:\s]+|[,.;:\s]+$", "", texto or "").strip()
+
+
+def normalizar_texto_libre(valor: str | None) -> str:
+    texto = quitar_tildes(str(valor or "")).upper()
+    texto = re.sub(r"[^A-Z0-9\s]", " ", texto)
+    texto = re.sub(r"\s+", " ", texto).strip()
+    return texto
+
+
+def get_municipios_endpoint() -> str:
+    return f"{SICETAC_API_BASE}/municipios"
+
+
+def ensure_municipios_cache() -> None:
+    loaded_at = MUNICIPIOS_CACHE.get("loaded_at")
+    if isinstance(loaded_at, datetime):
+        age = (utcnow() - loaded_at).total_seconds()
+        if age < MUNICIPIOS_CACHE_TTL_SECONDS and MUNICIPIOS_CACHE.get("aliases"):
+            return
+
+    try:
+        resp = requests.get(get_municipios_endpoint(), timeout=REQUEST_TIMEOUT)
+        if resp.status_code >= 400:
+            logger.warning(f"Municipios cache fetch failed: status={resp.status_code}")
+            return
+        data = resp.json()
+        municipios = data.get("municipios") or []
+        aliases: dict[str, dict] = {}
+        for item in municipios:
+            codigo = str(item.get("codigo_dane") or "").strip() or None
+            nombre_oficial = str(item.get("nombre_oficial") or "").strip()
+            departamento = str(item.get("departamento") or "").strip() or None
+            posibles = [
+                nombre_oficial,
+                item.get("variacion_1"),
+                item.get("variacion_2"),
+                item.get("variacion_3"),
+            ]
+            for posible in posibles:
+                clave = normalizar_texto_libre(posible)
+                if not clave:
+                    continue
+                aliases.setdefault(
+                    clave,
+                    {
+                        "codigo_dane": codigo,
+                        "nombre_oficial": nombre_oficial,
+                        "departamento": departamento,
+                    },
+                )
+        ordered_aliases = sorted(aliases.keys(), key=len, reverse=True)
+        MUNICIPIOS_CACHE["aliases"] = aliases
+        MUNICIPIOS_CACHE["ordered_aliases"] = ordered_aliases
+        MUNICIPIOS_CACHE["loaded_at"] = utcnow()
+    except Exception as e:
+        logger.warning(f"Municipios cache unavailable: {e}")
+
+
+def resolver_municipio_cache(texto: str | None) -> dict | None:
+    ensure_municipios_cache()
+    aliases = MUNICIPIOS_CACHE.get("aliases") or {}
+    clave = normalizar_texto_libre(texto)
+    if not clave:
+        return None
+    return aliases.get(clave)
+
+
+def extraer_municipios_en_texto(texto: str) -> list[dict]:
+    ensure_municipios_cache()
+    aliases = MUNICIPIOS_CACHE.get("aliases") or {}
+    ordered_aliases = MUNICIPIOS_CACHE.get("ordered_aliases") or []
+    texto_normalizado = f" {normalizar_texto_libre(texto)} "
+    encontrados: list[dict] = []
+    spans_ocupados: list[tuple[int, int]] = []
+
+    for alias in ordered_aliases:
+        patron = f" {alias} "
+        start = texto_normalizado.find(patron)
+        if start == -1:
+            continue
+        end = start + len(patron)
+        if any(not (end <= s or start >= e) for s, e in spans_ocupados):
+            continue
+        info = aliases.get(alias)
+        if not info:
+            continue
+        encontrados.append(
+            {
+                "match": alias,
+                "start": start,
+                "end": end,
+                "codigo_dane": info.get("codigo_dane"),
+                "nombre_oficial": info.get("nombre_oficial"),
+                "departamento": info.get("departamento"),
+            }
+        )
+        spans_ocupados.append((start, end))
+
+    encontrados.sort(key=lambda item: item["start"])
+    unicos: list[dict] = []
+    vistos: set[str] = set()
+    for item in encontrados:
+        clave = f"{item.get('codigo_dane')}|{item.get('nombre_oficial')}"
+        if clave in vistos:
+            continue
+        vistos.add(clave)
+        unicos.append(item)
+    return unicos
+
+
+def inferir_ruta_con_municipios(texto: str) -> dict | None:
+    municipios = extraer_municipios_en_texto(texto)
+    if len(municipios) < 2:
+        return None
+    origen_info = municipios[0]
+    destino_info = municipios[1]
+    return {
+        "origen": normalizar_ciudad(origen_info.get("nombre_oficial") or ""),
+        "destino": normalizar_ciudad(destino_info.get("nombre_oficial") or ""),
+        "codigo_dane_origen": origen_info.get("codigo_dane"),
+        "codigo_dane_destino": destino_info.get("codigo_dane"),
+    }
 
 
 def recortar_destino(destino_raw: str) -> str:
@@ -266,9 +398,9 @@ def parsear_ruta(texto: str) -> dict | None:
     )
 
     patterns = [
-        r"^(?:de\s+)?(.+?)\s+a\s+(.+)$",
-        r"^(?:de\s+)?(.+?)\s+para\s+(.+)$",
-        r"^(?:de\s+)?(.+?)\s+hasta\s+(.+)$",
+        r"^(?:(?:de|desde)\s+)?(.+?)\s+a\s+(.+)$",
+        r"^(?:(?:de|desde)\s+)?(.+?)\s+para\s+(.+)$",
+        r"^(?:(?:de|desde)\s+)?(.+?)\s+hasta\s+(.+)$",
         r"^(.+?)\s*->\s*(.+)$",
         r"^(.+?)\s*-\s*(.+)$",
         r"^entre\s+(.+?)\s+y\s+(.+)$",
@@ -283,11 +415,20 @@ def parsear_ruta(texto: str) -> dict | None:
 
         origen_raw = limpiar_fragmento_ruta(match.group(1))
         destino_raw = limpiar_fragmento_ruta(match.group(2))
-        origen = normalizar_ciudad(" ".join(origen_raw.split()))
-        destino = normalizar_ciudad(recortar_destino(destino_raw))
+        origen_txt = " ".join(origen_raw.split())
+        destino_txt = recortar_destino(destino_raw)
+        origen_resuelto = resolver_municipio_cache(origen_txt)
+        destino_resuelto = resolver_municipio_cache(destino_txt)
+        origen = normalizar_ciudad((origen_resuelto or {}).get("nombre_oficial") or origen_txt)
+        destino = normalizar_ciudad((destino_resuelto or {}).get("nombre_oficial") or destino_txt)
         if origen and destino:
-            return {"origen": origen, "destino": destino}
-    return None
+            ruta = {"origen": origen, "destino": destino}
+            if origen_resuelto:
+                ruta["codigo_dane_origen"] = origen_resuelto.get("codigo_dane")
+            if destino_resuelto:
+                ruta["codigo_dane_destino"] = destino_resuelto.get("codigo_dane")
+            return ruta
+    return inferir_ruta_con_municipios(texto)
 
 
 def parsear_vehiculo(texto: str) -> str | None:
@@ -608,6 +749,8 @@ def consultar_sicetac(
     resumen: bool = True,
     horas_logisticas: float | None = None,
     tarifa_standby: float | None = None,
+    codigo_dane_origen: str | None = None,
+    codigo_dane_destino: str | None = None,
 ) -> dict | None:
     payload = {
         "origen": origen,
@@ -620,6 +763,10 @@ def consultar_sicetac(
         payload["carroceria"] = carroceria
     if modo_viaje:
         payload["modo_viaje"] = modo_viaje
+    if codigo_dane_origen:
+        payload["codigo_dane_origen"] = codigo_dane_origen
+    if codigo_dane_destino:
+        payload["codigo_dane_destino"] = codigo_dane_destino
     if horas_logisticas is not None:
         payload["horas_logisticas"] = horas_logisticas
         payload["horas_logisticas_personalizadas"] = horas_logisticas
@@ -1070,6 +1217,8 @@ async def receive_message(request: Request):
         vehiculo=vehiculo,
         carroceria=carroceria,
         modo_viaje=modo_viaje,
+        codigo_dane_origen=ruta.get("codigo_dane_origen"),
+        codigo_dane_destino=ruta.get("codigo_dane_destino"),
     )
 
     if resultado is None:
