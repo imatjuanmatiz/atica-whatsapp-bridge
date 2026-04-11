@@ -78,12 +78,15 @@ CARROCERIA_ALIASES = {
     "GENERAL": "General - Estacas",
     "GENERAL ESTACAS": "General - Estacas",
     "GENERAL - ESTACAS": "General - Estacas",
+    "ESTACAS": "General - Estacas",
     "GENERAL ESTIBA": "General - Estacas",
     "GENERAL - ESTIBA": "General - Estacas",
+    "GENERAL ESTIBAS CORTA": "General - Estacas",
     "ESTIBA": "General - Estibas",
     "ESTIBAS": "General - Estibas",
     "GENERAL ESTIBAS": "General - Estibas",
     "GENERAL - ESTIBAS": "General - Estibas",
+    "FURGON": "General - Furgon",
     "PLATAFORMA": "General - Plataforma",
     "GENERAL PLATAFORMA": "General - Plataforma",
     "GENERAL - PLATAFORMA": "General - Plataforma",
@@ -96,6 +99,8 @@ CARROCERIA_ALIASES = {
     "FURGON REFRIGERADO": "Furgon Refrigerado",
     "CARGA REFRIGERADA": "Furgon Refrigerado",
     "REFRIGERADO": "Furgon Refrigerado",
+    "FRIO": "Furgon Refrigerado",
+    "FRIGORIFICO": "Furgon Refrigerado",
     "ESTACAS GRANEL SOLIDO": "Granel Solido - Estacas",
     "GRANEL SOLIDO ESTACAS": "Granel Solido - Estacas",
     "GRANEL SOLIDO - ESTACAS": "Granel Solido - Estacas",
@@ -114,6 +119,7 @@ CARROCERIA_ALIASES = {
     "TANQUE - GRANEL LIQUIDO": "Granel Liquido - Tanque",
     "TANQUE GRANEL LIQUIDO": "Granel Liquido - Tanque",
     "GRANEL LIQUIDO TANQUE": "Granel Liquido - Tanque",
+    "TANQUE": "Granel Liquido - Tanque",
 }
 
 CARROCERIAS_VALIDAS = BODY_TYPE_OPTIONS[:]
@@ -649,6 +655,8 @@ def formatear_respuesta(data: dict, *, include_closing: bool = True) -> str:
         if include_closing:
             lineas.append("")
             lineas.append("Escribe otra ruta asi: origen a destino.")
+            lineas.append("Si quieres ver mas opciones, escribe: opciones.")
+            lineas.append("Si quieres cambiar configuracion, escribe: cambiar configuracion.")
         return "\n".join(lineas)
     except Exception as e:
         logger.error(f"Error formateando: {e}")
@@ -660,11 +668,13 @@ def mensaje_ayuda() -> str:
         "Hola Soy Atica de Atiemppo ahora en Whatsapp!, estoy aca para proporcionarte la informacion de SICETAC al instante y en tu telefono.\n\n"
         "Escribe la ruta directo asi: origen a destino.\n"
         "Si quieres ver configuraciones y carrocerias disponibles, escribe: opciones.\n"
+        "Si quieres cambiar configuracion o carroceria, escribe: cambiar configuracion.\n"
         f"Si no indicas configuracion o carroceria, uso {DEFAULT_VEHICULO} y {quitar_tildes(DEFAULT_CARROCERIA)}.\n\n"
         "Ejemplos:\n"
         "- Bogota a Barranquilla\n"
-        "- Medellin a Cartagena C3S3\n"
-        "- Cali a Buenaventura portacontenedores\n\n"
+        "- Medellin a Cartagena C2M10\n"
+        "- Cali a Buenaventura portacontenedores\n"
+        "- Bogota a Barranquilla C3S3 furgon refrigerado\n\n"
         "Escribe la ruta que quieres que analicemos hoy."
     )
 
@@ -688,8 +698,21 @@ def mensaje_opciones() -> str:
         f"Si no indicas una, uso {DEFAULT_VEHICULO} y {quitar_tildes(DEFAULT_CARROCERIA)}.\n\n"
         "Ejemplos:\n"
         "- Bogota a Barranquilla\n"
-        "- Medellin a Cartagena C3S3\n"
-        "- Cali a Buenaventura portacontenedores"
+        "- Medellin a Cartagena C2M10\n"
+        "- Cali a Buenaventura portacontenedores\n"
+        "- Bogota a Barranquilla C3S3 furgon refrigerado\n\n"
+        "Tambien puedes escribir ayuda o cambiar configuracion."
+    )
+
+
+def usuario_quiere_cambiar_configuracion(texto: str) -> bool:
+    texto_normalizado = normalizar_lookup_texto(texto)
+    return (
+        "CAMBIAR CONFIGURACION" in texto_normalizado
+        or "CAMBIAR CONFIGURACION" in texto_normalizado
+        or "CAMBIAR VEHICULO" in texto_normalizado
+        or "CAMBIAR CARROCERIA" in texto_normalizado
+        or "CAMBIAR CARROCERIA" in texto_normalizado
     )
 
 
@@ -1128,7 +1151,7 @@ async def receive_message(request: Request):
         )
         return {"status": "help sent"}
 
-    if texto_lower in ("opciones", "configuraciones", "vehiculos", "vehículos", "carrocerias", "carrocerias", "menu opciones"):
+    if texto_lower in ("opciones", "configuraciones", "vehiculos", "vehículos", "carrocerias", "carrocerias", "menu opciones") or usuario_quiere_cambiar_configuracion(user_text):
         send_whatsapp_message(to=from_number, body=mensaje_opciones())
         capture_lead_event(
             {
