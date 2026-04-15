@@ -868,19 +868,17 @@ def formatear_valor_plaza(data: dict) -> str | None:
 
     tipo_carga = quitar_tildes(plaza.get("tipo_carga_label") or "Carga normal")
     promedio = plaza.get("promedio_ultimos_meses")
-    lineas = [f"Valor en plaza ultimos {len(meses)} meses ({tipo_carga}):"]
+    lineas = [f"Valor en plaza RNDC ultimos {len(meses)} meses ({tipo_carga}):"]
     for item in meses:
         mes_label = item.get("mes_label") or item.get("mes_codigo") or "Mes"
         valor = item.get("valor")
-        fuente = quitar_tildes(item.get("fuente") or "")
         linea = f"- {mes_label}: {fmt_cop(valor)}"
-        if fuente:
-            linea += f" | fuente: {fuente}"
         lineas.append(linea)
     if promedio is not None:
         lineas.append(f"Promedio: {fmt_cop(promedio)}")
     if plaza.get("fallback_to_carga_normal"):
         lineas.append("Nota: para esta carroceria no habia valor especifico y use carga normal.")
+    lineas.append("Fuente: Calculos Atica - Atiemppo.")
     return "\n".join(lineas)
 
 
