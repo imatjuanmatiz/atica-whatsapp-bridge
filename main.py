@@ -1,5 +1,5 @@
 """
-ATICA WhatsApp Bridge v3.1
+ATICA WhatsApp Bridge v3.2
 Conecta WhatsApp Cloud API con la API SICETAC y, de forma opcional,
 con OpenAI para dar respuestas conversacionales.
 """
@@ -18,7 +18,7 @@ import requests
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("atica-whatsapp")
 
-app = FastAPI(title="ATICA WhatsApp Bridge", version="3.1.0")
+app = FastAPI(title="ATICA WhatsApp Bridge", version="3.2.0")
 
 
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "aticatoken123")
@@ -73,6 +73,39 @@ BODY_TYPE_OPTIONS = [
     "Granel Solido - Plataforma",
     "Granel Liquido - Tanque",
 ]
+
+BODY_TYPE_GROUPS = {
+    "body_general": {
+        "title": "General",
+        "button_title": "General",
+        "options": [
+            "General - Estacas",
+            "General - Furgon",
+            "General - Estibas",
+            "General - Plataforma",
+        ],
+    },
+    "body_especial": {
+        "title": "Especial",
+        "button_title": "Especiales",
+        "options": [
+            "Portacontenedores",
+            "Furgon Refrigerado",
+            "Granel Liquido - Tanque",
+        ],
+    },
+    "body_granel": {
+        "title": "Granel",
+        "button_title": "Granel",
+        "options": [
+            "Granel Solido - Estacas",
+            "Granel Solido - Furgon",
+            "Granel Solido - Volco",
+            "Granel Solido - Estibas",
+            "Granel Solido - Plataforma",
+        ],
+    },
+}
 
 CARROCERIA_ALIASES = {
     "GENERAL": "General - Estacas",
@@ -194,6 +227,11 @@ MUNICIPIOS_CACHE: dict[str, object] = {
     "aliases": {},
     "ordered_aliases": [],
 }
+VEHICULOS_CACHE: dict[str, object] = {
+    "loaded_at": None,
+    "aliases": {},
+    "details": {},
+}
 
 
 def utcnow_iso() -> str:
@@ -238,6 +276,22 @@ def normalizar_texto_libre(valor: str | None) -> str:
     return texto
 
 
+def safe_title(texto: str, limit: int = 24) -> str:
+    limpio = re.sub(r"\s+", " ", str(texto or "")).strip()
+    if len(limpio) <= limit:
+        return limpio
+    return f"{limpio[: limit - 3].rstrip()}..."
+
+
+def safe_description(texto: str | None, limit: int = 72) -> str | None:
+    limpio = re.sub(r"\s+", " ", str(texto or "")).strip()
+    if not limpio:
+        return None
+    if len(limpio) <= limit:
+        return limpio
+    return f"{limpio[: limit - 3].rstrip()}..."
+
+
 def strip_intent_prefixes(texto: str) -> tuple[str, str | None]:
     cleaned = re.sub(r"\s+", " ", (texto or "").strip())
     lowered = quitar_tildes(cleaned).lower()
@@ -252,17 +306,22 @@ def get_municipios_endpoint() -> str:
     return f"{SICETAC_API_BASE}/municipios"
 
 
+def get_vehiculos_endpoint() -> str:
+    return f"{SICETAC_API_BASE}/opciones/vehiculos"
+
+
 def ensure_municipios_cache() -> None:
     loaded_at = MUNICIPIOS_CACHE.get("loaded_at")
     if isinstance(loaded_at, datetime):
         age = (utcnow() - loaded_at).total_seconds()
-        if age < MUNICIPIOS_CACHE_TTL_SECONDS and MUNICIPIOS_CACHE.get("aliases"):
+        if age < MUNICIPIOS_CACHE_TTL_SECONDS:
             return
 
     try:
         resp = requests.get(get_municipios_endpoint(), timeout=REQUEST_TIMEOUT)
         if resp.status_code >= 400:
             logger.warning(f"Municipios cache fetch failed: status={resp.status_code}")
+            MUNICIPIOS_CACHE["loaded_at"] = utcnow()
             return
         data = resp.json()
         municipios = data.get("municipios") or []
@@ -295,6 +354,62 @@ def ensure_municipios_cache() -> None:
         MUNICIPIOS_CACHE["loaded_at"] = utcnow()
     except Exception as e:
         logger.warning(f"Municipios cache unavailable: {e}")
+        MUNICIPIOS_CACHE["loaded_at"] = utcnow()
+
+
+def ensure_vehiculos_cache() -> None:
+    loaded_at = VEHICULOS_CACHE.get("loaded_at")
+    if isinstance(loaded_at, datetime):
+        age = (utcnow() - loaded_at).total_seconds()
+        if age < MUNICIPIOS_CACHE_TTL_SECONDS:
+            return
+
+    try:
+        resp = requests.get(get_vehiculos_endpoint(), timeout=REQUEST_TIMEOUT)
+        if resp.status_code >= 400:
+            logger.warning(f"Vehiculos cache fetch failed: status={resp.status_code}")
+            VEHICULOS_CACHE["loaded_at"] = utcnow()
+            return
+        data = resp.json()
+        vehiculos = data.get("vehiculos") or []
+        aliases: dict[str, str] = {}
+        details: dict[str, dict] = {}
+        for item in vehiculos:
+            tipo = str(item.get("tipo_vehiculo") or "").strip().upper()
+            analisis = str(item.get("configuracion_analisis") or "").strip().upper()
+            detalle = str(item.get("detalle_tipo_vehiculo") or "").strip()
+            if not tipo:
+                continue
+            aliases[tipo] = tipo
+            aliases[tipo.replace("C", "", 1)] = tipo
+            if analisis:
+                aliases[analisis] = tipo
+            details[tipo] = {
+                "tipo_vehiculo": tipo,
+                "configuracion_analisis": analisis or None,
+                "detalle_tipo_vehiculo": detalle or None,
+            }
+        VEHICULOS_CACHE["aliases"] = aliases
+        VEHICULOS_CACHE["details"] = details
+        VEHICULOS_CACHE["loaded_at"] = utcnow()
+    except Exception as e:
+        logger.warning(f"Vehiculos cache unavailable: {e}")
+        VEHICULOS_CACHE["loaded_at"] = utcnow()
+
+
+def resolver_vehiculo_cache(texto: str | None) -> str | None:
+    ensure_vehiculos_cache()
+    aliases = VEHICULOS_CACHE.get("aliases") or {}
+    clave = normalizar_texto_libre(texto)
+    if not clave:
+        return None
+    return aliases.get(clave)
+
+
+def get_vehicle_detail(vehiculo: str) -> dict | None:
+    ensure_vehiculos_cache()
+    details = VEHICULOS_CACHE.get("details") or {}
+    return details.get((vehiculo or "").strip().upper())
 
 
 def resolver_municipio_cache(texto: str | None) -> dict | None:
@@ -505,9 +620,18 @@ def analizar_texto_busqueda(texto: str) -> dict:
 
 
 def parsear_vehiculo(texto: str) -> str | None:
+    ensure_vehiculos_cache()
+    texto_normalizado = normalizar_texto_libre(texto)
+    aliases = VEHICULOS_CACHE.get("aliases") or {}
+    for alias in sorted(aliases.keys(), key=len, reverse=True):
+        patron = f" {alias} "
+        if patron in f" {texto_normalizado} ":
+            return aliases.get(alias)
     texto_upper = texto.upper()
     for vehiculo in sorted(VEHICULOS_VALIDOS, key=len, reverse=True):
         if vehiculo in texto_upper:
+            return vehiculo
+        if vehiculo.replace("C", "", 1) in texto_upper:
             return vehiculo
     return None
 
@@ -575,20 +699,26 @@ def detectar_pregunta_configuracion(texto: str) -> str | None:
         or "TIPO DE VEHICULO" in texto_upper
         or "TIPO DE VEHÍCULO" in texto_upper
     ):
-        for vehiculo in VEHICULOS_VALIDOS:
-            if vehiculo in texto_upper:
-                return vehiculo
+        vehiculo = parsear_vehiculo(texto)
+        if vehiculo:
+            return vehiculo
     return None
 
 
 def mensaje_configuracion_vehiculo(vehiculo: str) -> str:
-    descripcion = VEHICULO_DESCRIPCIONES.get(vehiculo, "configuración vehicular SICETAC")
-    return (
-        f"{vehiculo} corresponde a {quitar_tildes(descripcion)}.\n\n"
-        "Si quieres, te calculo una ruta con esa configuracion. "
-        "Escribeme por ejemplo: Bogota a Barranquilla "
-        f"{vehiculo}_"
+    detalle = get_vehicle_detail(vehiculo) or {}
+    descripcion = (
+        detalle.get("detalle_tipo_vehiculo")
+        or VEHICULO_DESCRIPCIONES.get(vehiculo)
+        or "configuración vehicular SICETAC"
     )
+    configuracion_analisis = detalle.get("configuracion_analisis")
+    lineas = [f"{vehiculo} corresponde a {quitar_tildes(descripcion)}."]
+    if configuracion_analisis:
+        lineas.append(f"En analisis o valor de plaza tambien puede aparecer como {quitar_tildes(configuracion_analisis)}.")
+    lineas.append("")
+    lineas.append(f"Si quieres, te calculo una ruta con esa configuracion. Escribeme por ejemplo: Bogota a Barranquilla {vehiculo}")
+    return "\n".join(lineas)
 
 
 def extraer_email(texto: str) -> str | None:
@@ -736,6 +866,7 @@ def mensaje_ayuda() -> str:
         "Escribe la ruta directo asi: origen a destino.\n"
         "Si quieres ver configuraciones y carrocerias disponibles, escribe: opciones.\n"
         "Si quieres cambiar configuracion o carroceria, escribe: cambiar configuracion.\n"
+        "Tambien puedes escribir configuraciones sin la C, por ejemplo 3S3 o 2S2.\n"
         f"Si no indicas configuracion o carroceria, uso {DEFAULT_VEHICULO} y {quitar_tildes(DEFAULT_CARROCERIA)}.\n\n"
         "Ejemplos:\n"
         "- Bogota a Barranquilla\n"
@@ -749,6 +880,7 @@ def mensaje_ayuda() -> str:
 def mensaje_opciones() -> str:
     return (
         "Configuraciones: C278, C289, C2910, C2M10, C3, C2S2, C2S3, C3S2, C3S3 y V3.\n\n"
+        "Tambien puedes escribirlas sin la C cuando aplique: 2S2, 2S3, 3S2, 3S3.\n\n"
         "Carrocerias:\n"
         "- General - Estacas\n"
         "- General - Furgon\n"
@@ -783,6 +915,33 @@ def usuario_quiere_cambiar_configuracion(texto: str) -> bool:
     )
 
 
+def mensaje_configuracion_guardada(vehiculo: str | None = None, carroceria: str | None = None) -> str:
+    partes = []
+    if vehiculo:
+        partes.append(f"vehiculo {vehiculo}")
+    if carroceria:
+        partes.append(f"carroceria {quitar_tildes(carroceria)}")
+    detalle = " y ".join(partes) if partes else "la configuracion"
+    return (
+        f"Listo. Guardare {detalle} como preferida en esta conversacion.\n\n"
+        "Ahora escribe la ruta asi: origen a destino."
+    )
+
+
+def mensaje_menu_configuracion() -> str:
+    return (
+        "Que quieres ajustar?\n\n"
+        f"Configuracion actual: {DEFAULT_VEHICULO} y {quitar_tildes(DEFAULT_CARROCERIA)} si no has elegido otra en esta conversacion."
+    )
+
+
+def mensaje_seleccion_carroceria() -> str:
+    return (
+        "Elige el grupo de carroceria.\n\n"
+        "Luego te muestro las opciones y la guardo para las siguientes rutas de esta conversacion."
+    )
+
+
 def get_contact_name(value: dict) -> str | None:
     contacts = value.get("contacts") or []
     if not contacts:
@@ -807,8 +966,29 @@ def get_state(phone: str) -> dict:
             },
             "last_route": None,
             "last_result": None,
+            "preferred_vehicle": None,
+            "preferred_body_type": None,
+            "pending_selection": None,
         },
     )
+
+
+def get_preferred_vehicle(state: dict) -> str:
+    return (state.get("preferred_vehicle") or DEFAULT_VEHICULO).strip()
+
+
+def get_preferred_body_type(state: dict) -> str:
+    return (state.get("preferred_body_type") or DEFAULT_CARROCERIA).strip()
+
+
+def set_preferred_vehicle(state: dict, vehiculo: str | None):
+    if vehiculo:
+        state["preferred_vehicle"] = vehiculo.strip().upper()
+
+
+def set_preferred_body_type(state: dict, carroceria: str | None):
+    if carroceria:
+        state["preferred_body_type"] = carroceria.strip()
 
 
 def merge_lead_data(state: dict, profile_name: str | None, text: str):
@@ -1146,11 +1326,222 @@ def resolver_contexto_consulta(user_text: str, state: dict) -> tuple[dict | None
     return None, False
 
 
+def extract_incoming_message(message: dict) -> tuple[str | None, str]:
+    message_type = (message.get("type") or "").strip()
+    if message_type == "text":
+        body = ((message.get("text") or {}).get("body") or "").strip()
+        return body or None, "text"
+    if message_type == "interactive":
+        interactive = message.get("interactive") or {}
+        interactive_type = (interactive.get("type") or "").strip()
+        if interactive_type == "button_reply":
+            reply = interactive.get("button_reply") or {}
+            body = (reply.get("id") or reply.get("title") or "").strip()
+            return body or None, "button_reply"
+        if interactive_type == "list_reply":
+            reply = interactive.get("list_reply") or {}
+            body = (reply.get("id") or reply.get("title") or "").strip()
+            return body or None, "list_reply"
+    return None, message_type or "unknown"
+
+
+def send_whatsapp_payload(to: str, payload: dict):
+    if not WHATSAPP_TOKEN or not WHATSAPP_PHONE_ID:
+        logger.warning("Missing WhatsApp credentials — skipping send")
+        return
+
+    url = f"https://graph.facebook.com/v22.0/{WHATSAPP_PHONE_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    full_payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        **payload,
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, json=full_payload, timeout=30)
+        logger.info(f"WA send [{to}]: status={resp.status_code}, type={payload.get('type')}")
+        if resp.status_code != 200:
+            logger.error(f"WA error: {resp.text}")
+    except Exception as e:
+        logger.error(f"WA send error: {e}")
+
+
+def send_whatsapp_message(to: str, body: str):
+    send_whatsapp_payload(
+        to,
+        {
+            "type": "text",
+            "text": {
+                "preview_url": False,
+                "body": body[:4096],
+            },
+        },
+    )
+
+
+def send_whatsapp_buttons(to: str, body: str, buttons: list[dict], footer: str | None = None):
+    action_buttons = []
+    for button in buttons[:3]:
+        action_buttons.append(
+            {
+                "type": "reply",
+                "reply": {
+                    "id": str(button.get("id") or "")[:256],
+                    "title": safe_title(button.get("title") or "", limit=20),
+                },
+            }
+        )
+    if not action_buttons:
+        return
+
+    interactive = {
+        "type": "button",
+        "body": {"text": body[:1024]},
+        "action": {"buttons": action_buttons},
+    }
+    if footer:
+        interactive["footer"] = {"text": footer[:60]}
+
+    send_whatsapp_payload(
+        to,
+        {
+            "type": "interactive",
+            "interactive": interactive,
+        },
+    )
+
+
+def send_whatsapp_list(to: str, body: str, button_text: str, sections: list[dict], footer: str | None = None):
+    interactive = {
+        "type": "list",
+        "body": {"text": body[:1024]},
+        "action": {
+            "button": safe_title(button_text, limit=20),
+            "sections": sections,
+        },
+    }
+    if footer:
+        interactive["footer"] = {"text": footer[:60]}
+
+    send_whatsapp_payload(
+        to,
+        {
+            "type": "interactive",
+            "interactive": interactive,
+        },
+    )
+
+
+def build_vehicle_rows() -> list[dict]:
+    rows = []
+    for vehiculo in VEHICULOS_VALIDOS:
+        detalle = get_vehicle_detail(vehiculo) or {}
+        descripcion = detalle.get("detalle_tipo_vehiculo") or VEHICULO_DESCRIPCIONES.get(vehiculo) or ""
+        row = {
+            "id": f"vehicle:{vehiculo}",
+            "title": vehiculo,
+        }
+        descripcion_corta = safe_description(quitar_tildes(descripcion))
+        if descripcion_corta:
+            row["description"] = descripcion_corta
+        rows.append(row)
+    return rows
+
+
+def build_body_rows(group_key: str) -> list[dict]:
+    group = BODY_TYPE_GROUPS.get(group_key) or {}
+    rows = []
+    for option in group.get("options") or []:
+        alias = {
+            "General - Estacas": "Alias: estacas o general",
+            "General - Furgon": "Alias: furgon",
+            "General - Estibas": "Alias: estibas",
+            "General - Plataforma": "Alias: plataforma",
+            "Portacontenedores": "Alias: portacontenedores",
+            "Furgon Refrigerado": "Alias: frio o refrigerado",
+            "Granel Solido - Volco": "Alias: volco",
+            "Granel Liquido - Tanque": "Alias: tanque",
+        }.get(option)
+        row = {
+            "id": f"body:{option}",
+            "title": safe_title(option, limit=24),
+        }
+        alias_corto = safe_description(alias)
+        if alias_corto:
+            row["description"] = alias_corto
+        rows.append(row)
+    return rows
+
+
+def send_configuration_menu(to: str):
+    send_whatsapp_buttons(
+        to=to,
+        body=mensaje_menu_configuracion(),
+        buttons=[
+            {"id": "config:vehicle_menu", "title": "Vehiculo"},
+            {"id": "config:body_menu", "title": "Carroceria"},
+            {"id": "config:options_text", "title": "Ver opciones"},
+        ],
+        footer="ATICA",
+    )
+
+
+def send_vehicle_selector(to: str):
+    send_whatsapp_list(
+        to=to,
+        body="Elige tu configuracion preferida. La guardo para esta conversacion y luego me escribes la ruta.",
+        button_text="Elegir vehiculo",
+        sections=[
+            {
+                "title": "Configuraciones",
+                "rows": build_vehicle_rows(),
+            }
+        ],
+        footer="Tambien puedes escribirla directo",
+    )
+
+
+def send_body_group_selector(to: str):
+    send_whatsapp_buttons(
+        to=to,
+        body=mensaje_seleccion_carroceria(),
+        buttons=[
+            {"id": "body_group:body_general", "title": "General"},
+            {"id": "body_group:body_especial", "title": "Especiales"},
+            {"id": "body_group:body_granel", "title": "Granel"},
+        ],
+        footer="ATICA",
+    )
+
+
+def send_body_selector(to: str, group_key: str):
+    group = BODY_TYPE_GROUPS.get(group_key)
+    if not group:
+        send_whatsapp_message(to=to, body=mensaje_opciones())
+        return
+    send_whatsapp_list(
+        to=to,
+        body=f"Elige la carroceria del grupo {group.get('title', 'seleccionado')}.",
+        button_text="Elegir carroceria",
+        sections=[
+            {
+                "title": group.get("title", "Carrocerias"),
+                "rows": build_body_rows(group_key),
+            }
+        ],
+        footer="Luego escribe la ruta",
+    )
+
+
 @app.get("/")
 async def health():
     return {
         "service": "atica-whatsapp-bridge",
-        "version": "3.1.0",
+        "version": "3.2.0",
         "status": "running",
         "sicetac_api": SICETAC_API_BASE,
         "openai_enabled": bool(OPENAI_API_KEY),
@@ -1190,24 +1581,84 @@ async def receive_message(request: Request):
         from_number = message["from"]
         profile_name = get_contact_name(value)
         state = get_state(from_number)
+        incoming_text, incoming_kind = extract_incoming_message(message)
 
-        if "text" not in message:
+        if not incoming_text:
             send_whatsapp_message(
                 to=from_number,
-                body="Por ahora solo proceso mensajes de texto. Escribe una ruta como: _Bogotá a Barranquilla_",
+                body="Por ahora proceso texto, botones y listas. Escribe una ruta como: Bogota a Barranquilla",
             )
             return {"status": "non-text"}
 
-        user_text = message["text"]["body"].strip()
+        user_text = incoming_text.strip()
         merge_lead_data(state, profile_name, user_text)
-        logger.info(f"MSG [{from_number}]: {user_text}")
+        logger.info(f"MSG [{from_number}] ({incoming_kind}): {user_text}")
     except Exception as e:
         logger.error(f"Parse error: {e}")
         return {"status": "parse error", "detail": str(e)}
 
+    if user_text.startswith("config:"):
+        if user_text == "config:vehicle_menu":
+            state["pending_selection"] = "vehicle"
+            send_vehicle_selector(from_number)
+            return {"status": "vehicle selector sent"}
+        if user_text == "config:body_menu":
+            state["pending_selection"] = "body_group"
+            send_body_group_selector(from_number)
+            return {"status": "body group selector sent"}
+        if user_text == "config:options_text":
+            send_whatsapp_message(to=from_number, body=mensaje_opciones())
+            return {"status": "options sent"}
+
+    if user_text.startswith("body_group:"):
+        group_key = user_text.split(":", 1)[1]
+        state["pending_selection"] = f"body:{group_key}"
+        send_body_selector(from_number, group_key)
+        return {"status": "body selector sent"}
+
+    if user_text.startswith("vehicle:"):
+        vehiculo_elegido = user_text.split(":", 1)[1].strip().upper()
+        if vehiculo_elegido in VEHICULOS_VALIDOS:
+            set_preferred_vehicle(state, vehiculo_elegido)
+            state["pending_selection"] = None
+            send_whatsapp_message(to=from_number, body=mensaje_configuracion_guardada(vehiculo=vehiculo_elegido))
+            capture_lead_event(
+                {
+                    "event": "preferred_vehicle_updated",
+                    "ts": utcnow_iso(),
+                    "channel": "whatsapp",
+                    "lead": state["lead"],
+                    "selection": {"preferred_vehicle": vehiculo_elegido},
+                }
+            )
+            return {"status": "preferred vehicle updated"}
+
+    if user_text.startswith("body:"):
+        carroceria_elegida = user_text.split(":", 1)[1].strip()
+        carroceria_normalizada = normalizar_carroceria(carroceria_elegida)
+        if carroceria_normalizada in CARROCERIAS_VALIDAS:
+            set_preferred_body_type(state, carroceria_normalizada)
+            state["pending_selection"] = None
+            send_whatsapp_message(
+                to=from_number,
+                body=mensaje_configuracion_guardada(carroceria=carroceria_normalizada),
+            )
+            capture_lead_event(
+                {
+                    "event": "preferred_body_type_updated",
+                    "ts": utcnow_iso(),
+                    "channel": "whatsapp",
+                    "lead": state["lead"],
+                    "selection": {"preferred_body_type": carroceria_normalizada},
+                }
+            )
+            return {"status": "preferred body updated"}
+
     texto_lower = user_text.lower().strip()
     if texto_lower in ("hola", "hi", "hello", "ayuda", "help", "menu", "menú", "inicio", "start", "?"):
         send_whatsapp_message(to=from_number, body=mensaje_ayuda())
+        if texto_lower in ("ayuda", "help", "menu", "menú"):
+            send_configuration_menu(from_number)
         capture_lead_event(
             {
                 "event": "help_requested",
@@ -1219,7 +1670,10 @@ async def receive_message(request: Request):
         return {"status": "help sent"}
 
     if texto_lower in ("opciones", "configuraciones", "vehiculos", "vehículos", "carrocerias", "carrocerias", "menu opciones") or usuario_quiere_cambiar_configuracion(user_text):
-        send_whatsapp_message(to=from_number, body=mensaje_opciones())
+        if usuario_quiere_cambiar_configuracion(user_text):
+            send_configuration_menu(from_number)
+        else:
+            send_whatsapp_message(to=from_number, body=mensaje_opciones())
         capture_lead_event(
             {
                 "event": "options_requested",
@@ -1286,22 +1740,27 @@ async def receive_message(request: Request):
     vehiculo_detectado = parsear_vehiculo(user_text)
     carroceria_detectada = parsear_carroceria(user_text)
     if ruta_en_mensaje_actual:
-        vehiculo = vehiculo_detectado or DEFAULT_VEHICULO
-        carroceria = carroceria_detectada or DEFAULT_CARROCERIA
+        vehiculo = vehiculo_detectado or get_preferred_vehicle(state)
+        carroceria = carroceria_detectada or get_preferred_body_type(state)
     else:
-        vehiculo = vehiculo_detectado or (state.get("last_route") or {}).get("vehiculo") or DEFAULT_VEHICULO
-        carroceria = carroceria_detectada or (state.get("last_route") or {}).get("carroceria") or DEFAULT_CARROCERIA
+        vehiculo = vehiculo_detectado or (state.get("last_route") or {}).get("vehiculo") or get_preferred_vehicle(state)
+        carroceria = carroceria_detectada or (state.get("last_route") or {}).get("carroceria") or get_preferred_body_type(state)
     modo_viaje = parsear_modo_viaje(user_text)
     horas_personalizadas = parsear_horas_personalizadas(user_text)
     toneladas_explicitas = parsear_toneladas(user_text)
     pide_valor_ton = usuario_pide_valor_por_tonelada(user_text)
     pide_horas = usuario_pide_otra_hora(user_text)
     uso_default_vehiculo = vehiculo_detectado is None and (
-        ruta_en_mensaje_actual or not (state.get("last_route") or {}).get("vehiculo")
+        ruta_en_mensaje_actual and not state.get("preferred_vehicle")
     )
     uso_default_carroceria = carroceria_detectada is None and (
-        ruta_en_mensaje_actual or not (state.get("last_route") or {}).get("carroceria")
+        ruta_en_mensaje_actual and not state.get("preferred_body_type")
     )
+
+    if vehiculo_detectado:
+        set_preferred_vehicle(state, vehiculo_detectado)
+    if carroceria_detectada:
+        set_preferred_body_type(state, carroceria_detectada)
 
     resultado = consultar_sicetac(
         origen=ruta["origen"],
@@ -1406,32 +1865,3 @@ async def receive_message(request: Request):
 
     logger.info(f"OK [{from_number}]: {ruta['origen']} -> {ruta['destino']}")
     return {"status": "ok"}
-
-
-def send_whatsapp_message(to: str, body: str):
-    if not WHATSAPP_TOKEN or not WHATSAPP_PHONE_ID:
-        logger.warning("Missing WhatsApp credentials — skipping send")
-        return
-
-    url = f"https://graph.facebook.com/v22.0/{WHATSAPP_PHONE_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "text",
-        "text": {
-            "preview_url": False,
-            "body": body[:4096],
-        },
-    }
-
-    try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=30)
-        logger.info(f"WA send [{to}]: status={resp.status_code}")
-        if resp.status_code != 200:
-            logger.error(f"WA error: {resp.text}")
-    except Exception as e:
-        logger.error(f"WA send error: {e}")
