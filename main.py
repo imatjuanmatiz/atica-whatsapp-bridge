@@ -1,5 +1,5 @@
 """
-ATICA WhatsApp Bridge v3.2
+ATICA WhatsApp Bridge v3.3
 Conecta WhatsApp Cloud API con la API SICETAC y, de forma opcional,
 con OpenAI para dar respuestas conversacionales.
 """
@@ -18,7 +18,7 @@ import requests
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("atica-whatsapp")
 
-app = FastAPI(title="ATICA WhatsApp Bridge", version="3.2.0")
+app = FastAPI(title="ATICA WhatsApp Bridge", version="3.3.0")
 
 
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "aticatoken123")
@@ -860,6 +860,30 @@ def formatear_respuesta(data: dict, *, include_closing: bool = True) -> str:
         return "Error al formatear la respuesta. Intenta de nuevo."
 
 
+def formatear_valor_plaza(data: dict) -> str | None:
+    plaza = data.get("valor_plaza") or {}
+    meses = plaza.get("meses") or []
+    if not meses:
+        return None
+
+    tipo_carga = quitar_tildes(plaza.get("tipo_carga_label") or "Carga normal")
+    promedio = plaza.get("promedio_ultimos_meses")
+    lineas = [f"Valor en plaza ultimos {len(meses)} meses ({tipo_carga}):"]
+    for item in meses:
+        mes_label = item.get("mes_label") or item.get("mes_codigo") or "Mes"
+        valor = item.get("valor")
+        fuente = quitar_tildes(item.get("fuente") or "")
+        linea = f"- {mes_label}: {fmt_cop(valor)}"
+        if fuente:
+            linea += f" | fuente: {fuente}"
+        lineas.append(linea)
+    if promedio is not None:
+        lineas.append(f"Promedio: {fmt_cop(promedio)}")
+    if plaza.get("fallback_to_carga_normal"):
+        lineas.append("Nota: para esta carroceria no habia valor especifico y use carga normal.")
+    return "\n".join(lineas)
+
+
 def mensaje_ayuda() -> str:
     return (
         "Hola Soy Atica de Atiemppo ahora en Whatsapp!, estoy aca para proporcionarte la informacion de SICETAC al instante y en tu telefono.\n\n"
@@ -1541,7 +1565,7 @@ def send_body_selector(to: str, group_key: str):
 async def health():
     return {
         "service": "atica-whatsapp-bridge",
-        "version": "3.2.0",
+        "version": "3.3.0",
         "status": "running",
         "sicetac_api": SICETAC_API_BASE,
         "openai_enabled": bool(OPENAI_API_KEY),
@@ -1839,6 +1863,12 @@ async def receive_message(request: Request):
         respuesta = respuesta_deterministica
     send_whatsapp_message(to=from_number, body=respuesta)
 
+    mensaje_plaza = None
+    if ruta_en_mensaje_actual and query_kind == "route_summary":
+        mensaje_plaza = formatear_valor_plaza(resultado)
+        if mensaje_plaza:
+            send_whatsapp_message(to=from_number, body=mensaje_plaza)
+
     capture_lead_event(
         {
             "event": "route_consulted",
@@ -1859,6 +1889,7 @@ async def receive_message(request: Request):
                 "used_default_body_type": uso_default_carroceria,
                 "sicetac_reference_total": total_referencia,
                 "sicetac_reference_bucket": total_bucket,
+                "market_plaza_attached": bool(mensaje_plaza),
             },
         }
     )
