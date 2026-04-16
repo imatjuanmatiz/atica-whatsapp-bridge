@@ -38,6 +38,9 @@ MUNICIPIOS_CACHE_TTL_SECONDS = int(os.environ.get("MUNICIPIOS_CACHE_TTL_SECONDS"
 OPENAI_API_KEY = (os.environ.get("OPENAI_API_KEY") or "").strip()
 OPENAI_MODEL = (os.environ.get("OPENAI_MODEL") or "gpt-5-mini").strip()
 OPENAI_API_URL = (os.environ.get("OPENAI_API_URL") or "https://api.openai.com/v1/responses").strip()
+OPENAI_FALLBACK_ENABLED = (
+    (os.environ.get("OPENAI_FALLBACK_ENABLED") or "false").strip().lower() == "true"
+)
 
 LEAD_CAPTURE_WEBHOOK_URL = (os.environ.get("LEAD_CAPTURE_WEBHOOK_URL") or "").strip()
 CAPTURE_WEBHOOK_SECRET = (os.environ.get("CAPTURE_WEBHOOK_SECRET") or "").strip()
@@ -1265,7 +1268,7 @@ def generar_respuesta_ia(
     resultado_sicetac: dict | None,
     deterministic_reply: str,
 ) -> str | None:
-    if not OPENAI_API_KEY:
+    if not OPENAI_API_KEY or not OPENAI_FALLBACK_ENABLED:
         return None
 
     context_payload = {
@@ -1566,7 +1569,9 @@ async def health():
         "version": "3.3.0",
         "status": "running",
         "sicetac_api": SICETAC_API_BASE,
-        "openai_enabled": bool(OPENAI_API_KEY),
+        "openai_enabled": bool(OPENAI_API_KEY and OPENAI_FALLBACK_ENABLED),
+        "openai_configured": bool(OPENAI_API_KEY),
+        "openai_fallback_enabled": OPENAI_FALLBACK_ENABLED,
         "lead_capture_enabled": bool(LEAD_CAPTURE_WEBHOOK_URL),
         "timestamp": datetime.utcnow().isoformat(),
     }
