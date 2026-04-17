@@ -279,6 +279,17 @@ def normalizar_texto_libre(valor: str | None) -> str:
     return texto
 
 
+def municipio_alias_priority(alias_original: str | None, nombre_oficial: str | None) -> tuple[int, int]:
+    alias_norm = normalizar_texto_libre(alias_original)
+    oficial_norm = normalizar_texto_libre(nombre_oficial)
+    score = 0
+    if alias_norm == oficial_norm:
+        score += 100
+    if " " not in oficial_norm:
+        score += 10
+    return (score, -len(oficial_norm))
+
+
 def safe_title(texto: str, limit: int = 24) -> str:
     limpio = re.sub(r"\s+", " ", str(texto or "")).strip()
     if len(limpio) <= limit:
@@ -343,15 +354,18 @@ def ensure_municipios_cache() -> None:
                 clave = normalizar_texto_libre(posible)
                 if not clave:
                     continue
-                aliases.setdefault(
-                    clave,
-                    {
-                        "codigo_dane": codigo,
-                        "nombre_oficial": nombre_oficial,
-                        "departamento": departamento,
-                    },
-                )
+                candidate = {
+                    "codigo_dane": codigo,
+                    "nombre_oficial": nombre_oficial,
+                    "departamento": departamento,
+                    "_priority": municipio_alias_priority(posible, nombre_oficial),
+                }
+                current = aliases.get(clave)
+                if not current or candidate["_priority"] > current.get("_priority", (0, 0)):
+                    aliases[clave] = candidate
         ordered_aliases = sorted(aliases.keys(), key=len, reverse=True)
+        for value in aliases.values():
+            value.pop("_priority", None)
         MUNICIPIOS_CACHE["aliases"] = aliases
         MUNICIPIOS_CACHE["ordered_aliases"] = ordered_aliases
         MUNICIPIOS_CACHE["loaded_at"] = utcnow()
