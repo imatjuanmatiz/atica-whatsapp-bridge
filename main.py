@@ -216,23 +216,6 @@ INTENT_PATTERNS = [
     "necesito",
 ]
 
-GREETING_ONLY_MESSAGES = {
-    "hola",
-    "hi",
-    "hello",
-    "ayuda",
-    "help",
-    "menu",
-    "inicio",
-    "start",
-    "?",
-    "buenos dias",
-    "buen dia",
-    "buenas tardes",
-    "buenas noches",
-    "buenas",
-}
-
 LEAD_EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 LEAD_COMPANY_RE = re.compile(
     r"(?:empresa|compañ[ií]a|compania|transportadora|soy de|trabajo en)\s*[:\-]?\s*([A-Za-z0-9ÁÉÍÓÚÑáéíóúñ .,&-]{3,80})",
@@ -331,17 +314,6 @@ def strip_intent_prefixes(texto: str) -> tuple[str, str | None]:
             remainder = cleaned[len(pattern):].strip(" ,.:;-")
             return remainder or cleaned, pattern
     return cleaned, None
-
-
-def normalizar_texto_chat(texto: str | None) -> str:
-    cleaned = re.sub(r"\s+", " ", str(texto or "").strip())
-    cleaned = quitar_tildes(cleaned).lower()
-    cleaned = re.sub(r"[!¡?¿,.;:]+", "", cleaned)
-    return cleaned.strip()
-
-
-def es_solo_saludo_o_ayuda(texto: str | None) -> bool:
-    return normalizar_texto_chat(texto) in GREETING_ONLY_MESSAGES
 
 
 def get_municipios_endpoint() -> str:
@@ -599,10 +571,10 @@ def normalizar_ciudad(texto: str) -> str:
 
 def parsear_ruta(texto: str) -> dict | None:
     texto_base, _ = strip_intent_prefixes(texto)
-    texto = quitar_tildes(texto_base.strip().lower())
+    texto = texto_base.strip().lower()
     texto = re.sub(
         r"^(valor por tonelada|por tonelada|cuanto por tonelada|cuánto por tonelada|valor por ton|por ton|"
-        r"hola|buenos dias|buen dia|buenas tardes|buenas noches|buenas|consulta|consultar|"
+        r"hola|buenos días|buenas tardes|buenas noches|buenas|consulta|consultar|"
         r"ruta|flete|tarifa|cuanto cuesta|cuánto cuesta|precio|calcular|calcular ruta|"
         r"valor|costo|ahora|ok|bueno|entonces)\s*[,.:;]?\s*",
         "",
@@ -1724,10 +1696,9 @@ async def receive_message(request: Request):
             return {"status": "preferred body updated"}
 
     texto_lower = user_text.lower().strip()
-    texto_normalizado_chat = normalizar_texto_chat(user_text)
-    if es_solo_saludo_o_ayuda(user_text):
+    if texto_lower in ("hola", "hi", "hello", "ayuda", "help", "menu", "menú", "inicio", "start", "?"):
         send_whatsapp_message(to=from_number, body=mensaje_ayuda())
-        if texto_normalizado_chat in ("ayuda", "help", "menu"):
+        if texto_lower in ("ayuda", "help", "menu", "menú"):
             send_configuration_menu(from_number)
         capture_lead_event(
             {
