@@ -911,7 +911,9 @@ def mensaje_ayuda() -> str:
         "- Bogota a Barranquilla\n"
         "- Medellin a Cartagena C2M10\n"
         "- Cali a Buenaventura portacontenedores\n"
-        "- Bogota a Barranquilla C3S3 furgon refrigerado\n\n"
+        "- Bogota a Barranquilla C3S3 furgon refrigerado\n"
+        "- Cartagena a Bogota C2S2 estacas\n"
+        "- Para cambiar una ruta ya calculada: escribe cambiar configuracion y elige C2S2\n\n"
         "Escribe la ruta que quieres que analicemos hoy."
     )
 
@@ -938,7 +940,9 @@ def mensaje_opciones() -> str:
         "- Bogota a Barranquilla\n"
         "- Medellin a Cartagena C2M10\n"
         "- Cali a Buenaventura portacontenedores\n"
-        "- Bogota a Barranquilla C3S3 furgon refrigerado\n\n"
+        "- Bogota a Barranquilla C3S3 furgon refrigerado\n"
+        "- Cartagena a Bogota C2S2 estacas\n"
+        "- Si ya calculaste una ruta y quieres cambiar vehiculo o carroceria, escribe: cambiar configuracion\n\n"
         "Tambien puedes escribir ayuda o cambiar configuracion."
     )
 
