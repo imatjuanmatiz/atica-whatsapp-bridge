@@ -341,14 +341,44 @@ def safe_description(texto: str | None, limit: int = 72) -> str | None:
     return f"{limpio[: limit - 3].rstrip()}..."
 
 
+LEADING_ROUTE_FILLER_RE = re.compile(
+    r"^(?:(?:de\s+la\s+ruta|de\s+ruta|la\s+ruta|ruta|del\s+flete|el\s+flete|del\s+viaje|el\s+viaje)\b[\s,.:;\-]*)+",
+    re.IGNORECASE,
+)
+
+
 def strip_intent_prefixes(texto: str) -> tuple[str, str | None]:
-    cleaned = re.sub(r"\s+", " ", (texto or "").strip())
-    lowered = quitar_tildes(cleaned).lower()
-    for pattern in sorted(INTENT_PATTERNS, key=len, reverse=True):
-        if lowered.startswith(pattern):
-            remainder = cleaned[len(pattern):].strip(" ,.:;-")
-            return remainder or cleaned, pattern
-    return cleaned, None
+    original = re.sub(r"\s+", " ", (texto or "").strip())
+    cleaned = original
+    matched_pattern = None
+
+    while cleaned:
+        previous = cleaned
+        lowered = quitar_tildes(cleaned).lower()
+
+        for pattern in sorted(INTENT_PATTERNS, key=len, reverse=True):
+            if lowered.startswith(pattern):
+                remainder = cleaned[len(pattern):].strip(" ,.:;-")
+                if remainder:
+                    cleaned = remainder
+                    matched_pattern = matched_pattern or pattern
+                break
+        if cleaned != previous:
+            continue
+
+        updated = ROUTE_PREFIX_RE.sub("", cleaned, count=1).strip()
+        if updated and updated != cleaned:
+            cleaned = updated
+            continue
+
+        updated = LEADING_ROUTE_FILLER_RE.sub("", cleaned).strip()
+        if updated and updated != cleaned:
+            cleaned = updated
+            continue
+
+        break
+
+    return (cleaned or original), matched_pattern
 
 
 def get_municipios_endpoint() -> str:
