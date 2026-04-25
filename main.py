@@ -1047,13 +1047,28 @@ def fmt_decimal(valor: float | int | None) -> str | None:
         return None
 
 
+def ordenar_variantes_sicetac(variantes: list[dict] | None) -> list[dict]:
+    items = list(variantes or [])
+
+    def sort_key(item: dict) -> tuple[int, int, str]:
+        raw_id = item.get("ID_SICE")
+        try:
+            return (0, int(raw_id), "")
+        except Exception:
+            return (1, 10**12, str(raw_id or ""))
+
+    return sorted(items, key=sort_key)
+
+
 def extraer_totales(data: dict | None) -> dict:
     if not data:
         return {}
     if data.get("totales"):
         return data.get("totales") or {}
-    variantes = data.get("variantes") or []
+    variantes = ordenar_variantes_sicetac(data.get("variantes") or [])
     if len(variantes) == 1:
+        return variantes[0].get("totales") or {}
+    if variantes:
         return variantes[0].get("totales") or {}
     return {}
 
@@ -1135,7 +1150,7 @@ def formatear_respuesta(data: dict, *, include_closing: bool = True) -> str:
             lineas.append(f"Periodo: {mes}")
 
         if "variantes" in data:
-            variantes = data["variantes"]
+            variantes = ordenar_variantes_sicetac(data["variantes"])
             lineas.append(f"Variantes encontradas: {len(variantes)}")
 
             for i, var in enumerate(variantes, 1):
@@ -1461,7 +1476,10 @@ def consultar_sicetac(
             logger.error(f"SICETAC error {resp.status_code}: {detail}")
             return {"_error": True, "_status": resp.status_code, "_detail": detail}
 
-        return resp.json()
+        data = resp.json()
+        if isinstance(data, dict) and data.get("variantes"):
+            data["variantes"] = ordenar_variantes_sicetac(data.get("variantes") or [])
+        return data
     except requests.exceptions.Timeout:
         logger.error("SICETAC timeout")
         return None
@@ -1474,7 +1492,7 @@ def build_sicetac_snapshot(data: dict | None) -> dict | None:
     if not data:
         return None
 
-    variantes = data.get("variantes") or []
+    variantes = ordenar_variantes_sicetac(data.get("variantes") or [])
     if variantes:
         return {
             "origen": data.get("origen"),
