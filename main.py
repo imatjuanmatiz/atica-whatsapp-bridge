@@ -841,6 +841,8 @@ def detectar_pregunta_configuracion(texto: str) -> str | None:
     if (
         "QUE ES" in texto_upper
         or "QUÉ ES" in texto_upper
+        or "CUAL ES" in texto_upper
+        or "CUÁL ES" in texto_upper
         or "QUE SIGNIFICA" in texto_upper
         or "QUÉ SIGNIFICA" in texto_upper
         or "TIPO DE VEHICULO" in texto_upper
@@ -1167,6 +1169,63 @@ def usuario_quiere_cambiar_configuracion(texto: str) -> bool:
         or "CAMBIAR CARROCERIA" in texto_normalizado
         or texto_normalizado.strip() in {"CONFIGURACION", "CONFIGURACIÓN", "CARROCERIA", "CARROCERÍA"}
     )
+
+
+def usuario_quiere_menu_vehiculo(texto: str) -> bool:
+    texto_normalizado = normalizar_lookup_texto(texto)
+    return any(
+        patron in texto_normalizado
+        for patron in [
+            "TIPO DE VEHICULO",
+            "TIPO DE VEHÍCULO",
+            "CONFIGURACION VEHICULAR",
+            "CONFIGURACIÓN VEHICULAR",
+            "CAMBIAR VEHICULO",
+            "CAMBIAR VEHÍCULO",
+            "VEHICULO",
+            "VEHÍCULO",
+            "TRACTOMULA",
+            "SENCILLO",
+        ]
+    )
+
+
+def usuario_quiere_menu_carroceria(texto: str) -> bool:
+    texto_normalizado = normalizar_lookup_texto(texto)
+    return any(
+        patron in texto_normalizado
+        for patron in [
+            "TIPO DE CARGA",
+            "CARROCERIA",
+            "CARROCERÍA",
+            "CAMBIAR CARGA",
+            "CAMBIAR CARROCERIA",
+            "CAMBIAR CARROCERÍA",
+            "REFRIGERADO",
+            "FRIO",
+            "FRÍO",
+            "GRANEL",
+            "CONTENEDOR",
+            "PORTACONTENEDOR",
+            "TANQUE",
+            "VOLCO",
+            "FURGON",
+            "FURGÓN",
+            "ESTACAS",
+            "ESTIBAS",
+            "PLATAFORMA",
+        ]
+    )
+
+
+def aplicar_preferencia_textual(user_text: str, state: dict) -> tuple[str | None, str | None]:
+    vehiculo = parsear_vehiculo(user_text)
+    carroceria = parsear_carroceria(user_text)
+    if vehiculo:
+        set_preferred_vehicle(state, vehiculo)
+    if carroceria:
+        set_preferred_body_type(state, carroceria)
+    return vehiculo, carroceria
 
 
 def mensaje_configuracion_guardada(vehiculo: str | None = None, carroceria: str | None = None) -> str:
@@ -1945,6 +2004,67 @@ async def receive_message(request: Request):
         )
         return {"status": "options sent"}
 
+    if usuario_quiere_menu_vehiculo(user_text) and not parsear_ruta(user_text):
+        vehiculo_preferido, _ = aplicar_preferencia_textual(user_text, state)
+        if vehiculo_preferido and not state.get("last_route"):
+            send_whatsapp_message(
+                to=from_number,
+                body=mensaje_configuracion_guardada(vehiculo=vehiculo_preferido),
+            )
+            capture_lead_event(
+                {
+                    "event": "preferred_vehicle_updated",
+                    "ts": utcnow_iso(),
+                    "channel": "whatsapp",
+                    "lead": state["lead"],
+                    "selection": {"preferred_vehicle": vehiculo_preferido},
+                }
+            )
+            return {"status": "preferred vehicle updated from text"}
+        send_vehicle_selector(from_number)
+        capture_lead_event(
+            {
+                "event": "options_requested",
+                "ts": utcnow_iso(),
+                "channel": "whatsapp",
+                "lead": state["lead"],
+                "message": user_text,
+            }
+        )
+        return {"status": "vehicle selector sent from text"}
+
+    if usuario_quiere_menu_carroceria(user_text) and not parsear_ruta(user_text):
+        _, carroceria_preferida = aplicar_preferencia_textual(user_text, state)
+        if carroceria_preferida and not state.get("last_route"):
+            send_whatsapp_message(
+                to=from_number,
+                body=mensaje_configuracion_guardada(carroceria=carroceria_preferida),
+            )
+            capture_lead_event(
+                {
+                    "event": "preferred_body_type_updated",
+                    "ts": utcnow_iso(),
+                    "channel": "whatsapp",
+                    "lead": state["lead"],
+                    "selection": {"preferred_body_type": carroceria_preferida},
+                }
+            )
+            return {"status": "preferred body updated from text"}
+        if any(token in normalizar_lookup_texto(user_text) for token in ["GRANEL", "TANQUE", "VOLCO", "REFRIGERADO", "FRIO", "FRÍO"]):
+            send_body_group_selector(from_number)
+            return {"status": "body group selector sent from text"}
+        send_body_group_selector(from_number)
+        capture_lead_event(
+            {
+                "event": "options_requested",
+                "ts": utcnow_iso(),
+                "channel": "whatsapp",
+                "lead": state["lead"],
+                "message": user_text,
+            }
+        )
+        return {"status": "body selector sent from text"}
+
     if usuario_pide_vacio(user_text):
         msg = (
             "Por ahora este canal solo entrega valores cargados.\n\n"
@@ -1977,6 +2097,35 @@ async def receive_message(request: Request):
             }
         )
         return {"status": "vehicle info sent"}
+
+    vehiculo_textual = parsear_vehiculo(user_text)
+    carroceria_textual = parsear_carroceria(user_text)
+    if not ruta and not state.get("last_route") and (vehiculo_textual or carroceria_textual):
+        if vehiculo_textual:
+            set_preferred_vehicle(state, vehiculo_textual)
+        if carroceria_textual:
+            set_preferred_body_type(state, carroceria_textual)
+        send_whatsapp_message(
+            to=from_number,
+            body=mensaje_configuracion_guardada(
+                vehiculo=vehiculo_textual,
+                carroceria=carroceria_textual,
+            ),
+        )
+        capture_lead_event(
+            {
+                "event": "preference_captured_without_route",
+                "ts": utcnow_iso(),
+                "channel": "whatsapp",
+                "lead": state["lead"],
+                "selection": {
+                    "preferred_vehicle": vehiculo_textual,
+                    "preferred_body_type": carroceria_textual,
+                },
+                "message": user_text,
+            }
+        )
+        return {"status": "preference captured without route"}
 
     if not ruta:
         fallback_reply = construir_respuesta_ruta_faltante(user_text, analisis_busqueda, state)
