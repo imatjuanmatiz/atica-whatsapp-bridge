@@ -1035,6 +1035,26 @@ def calcular_total_para_horas(data: dict | None, horas: float) -> float | None:
     return None
 
 
+def descripcion_corta_vehiculo(vehiculo: str | None) -> str:
+    vehiculo_norm = (vehiculo or "").strip().upper()
+    if not vehiculo_norm:
+        return ""
+    detalle = get_vehicle_detail(vehiculo_norm) or {}
+    descripcion = (
+        detalle.get("detalle_tipo_vehiculo")
+        or VEHICULO_DESCRIPCIONES.get(vehiculo_norm)
+        or ""
+    )
+    return quitar_tildes(descripcion)
+
+
+def etiqueta_horas_logisticas(clave: str) -> str:
+    horas = {"H2": 2, "H4": 4, "H8": 8}.get((clave or "").strip().upper())
+    if horas is None:
+        return clave
+    return f"{clave.upper()} ({horas} horas logisticas)"
+
+
 def formatear_respuesta(data: dict, *, include_closing: bool = True) -> str:
     try:
         origen = quitar_tildes(data.get("origen", "?"))
@@ -1042,10 +1062,16 @@ def formatear_respuesta(data: dict, *, include_closing: bool = True) -> str:
         config = data.get("configuracion", "C3S3")
         carroceria = quitar_tildes(data.get("carroceria", DEFAULT_CARROCERIA))
         mes = data.get("mes", "")
+        descripcion_vehiculo = descripcion_corta_vehiculo(config)
+
+        configuracion_linea = f"Configuracion: {config}"
+        if descripcion_vehiculo:
+            configuracion_linea += f" ({descripcion_vehiculo})"
+        configuracion_linea += f" | Carroceria: {carroceria}"
 
         lineas = [
             f"Ruta: {origen} a {destino}",
-            f"Configuracion: {config} | Carroceria: {carroceria}",
+            configuracion_linea,
         ]
         if mes:
             lineas.append(f"Periodo: {mes}")
@@ -1063,20 +1089,20 @@ def formatear_respuesta(data: dict, *, include_closing: bool = True) -> str:
                     etiqueta += f" (ID {id_sice})"
                 lineas.append(etiqueta)
                 if tot.get("H2") is not None:
-                    lineas.append(f"H2: {fmt_cop(tot.get('H2'))}")
+                    lineas.append(f"{etiqueta_horas_logisticas('H2')}: {fmt_cop(tot.get('H2'))}")
                 if tot.get("H4") is not None:
-                    lineas.append(f"H4: {fmt_cop(tot.get('H4'))}")
+                    lineas.append(f"{etiqueta_horas_logisticas('H4')}: {fmt_cop(tot.get('H4'))}")
                 if tot.get("H8") is not None:
-                    lineas.append(f"H8: {fmt_cop(tot.get('H8'))}")
+                    lineas.append(f"{etiqueta_horas_logisticas('H8')}: {fmt_cop(tot.get('H8'))}")
         else:
             totales = data.get("totales", {})
             lineas.append("Valores SICETAC:")
             if totales.get("H2") is not None:
-                lineas.append(f"H2: {fmt_cop(totales.get('H2'))}")
+                lineas.append(f"{etiqueta_horas_logisticas('H2')}: {fmt_cop(totales.get('H2'))}")
             if totales.get("H4") is not None:
-                lineas.append(f"H4: {fmt_cop(totales.get('H4'))}")
+                lineas.append(f"{etiqueta_horas_logisticas('H4')}: {fmt_cop(totales.get('H4'))}")
             if totales.get("H8") is not None:
-                lineas.append(f"H8: {fmt_cop(totales.get('H8'))}")
+                lineas.append(f"{etiqueta_horas_logisticas('H8')}: {fmt_cop(totales.get('H8'))}")
 
         if include_closing:
             lineas.append("")
@@ -1467,9 +1493,13 @@ def formatear_valor_por_tonelada(
     origen = quitar_tildes(resultado.get("origen"))
     destino = quitar_tildes(resultado.get("destino"))
     toneladas_txt = fmt_decimal(toneladas_base) or str(toneladas_base)
+    descripcion_vehiculo = descripcion_corta_vehiculo(vehiculo)
+    configuracion_linea = f"Configuracion: {vehiculo}"
+    if descripcion_vehiculo:
+        configuracion_linea += f" ({descripcion_vehiculo})"
     return (
         f"Ruta: {origen} a {destino}\n"
-        f"Configuracion: {vehiculo}\n"
+        f"{configuracion_linea}\n"
         f"Referencia usada: {etiqueta_horas} = {fmt_cop(total)}\n"
         f"Toneladas: {toneladas_txt}\n"
         f"Valor por tonelada: {fmt_cop(valor_ton)}\n\n"
@@ -1492,9 +1522,13 @@ def formatear_valor_personalizado_por_horas(
     origen = quitar_tildes(resultado.get("origen"))
     destino = quitar_tildes(resultado.get("destino"))
     horas_txt = fmt_decimal(horas) or str(horas)
+    descripcion_vehiculo = descripcion_corta_vehiculo(vehiculo)
+    configuracion_linea = f"Configuracion: {vehiculo}"
+    if descripcion_vehiculo:
+        configuracion_linea += f" ({descripcion_vehiculo})"
     lineas = [
         f"Ruta: {origen} a {destino}",
-        f"Configuracion: {vehiculo}",
+        configuracion_linea,
         f"Valor SICETAC para {horas_txt} horas: {fmt_cop(total)}",
     ]
     if incluir_por_tonelada:
