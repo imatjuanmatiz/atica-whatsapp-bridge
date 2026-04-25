@@ -1,7 +1,8 @@
 """
-ATICA WhatsApp Bridge v3.3
+ATICA WhatsApp Bridge v3.4
 Conecta WhatsApp Cloud API con la API SICETAC y, de forma opcional,
-con OpenAI para dar respuestas conversacionales.
+con modelos externos para extraer mejor la ruta cuando el parser por codigo
+no logra cerrarla.
 """
 
 from datetime import datetime, timezone
@@ -18,7 +19,7 @@ import requests
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("atica-whatsapp")
 
-app = FastAPI(title="ATICA WhatsApp Bridge", version="3.3.0")
+app = FastAPI(title="ATICA WhatsApp Bridge", version="3.4.0")
 
 
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "aticatoken123")
@@ -41,6 +42,13 @@ OPENAI_API_URL = (os.environ.get("OPENAI_API_URL") or "https://api.openai.com/v1
 OPENAI_FALLBACK_ENABLED = (
     (os.environ.get("OPENAI_FALLBACK_ENABLED") or "false").strip().lower() == "true"
 )
+GEMINI_API_KEY = (os.environ.get("GEMINI_API_KEY") or "").strip()
+GEMINI_MODEL = (os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash-lite").strip()
+GEMINI_ENABLED = ((os.environ.get("GEMINI_ENABLED") or "false").strip().lower() == "true")
+GEMINI_API_BASE = (
+    os.environ.get("GEMINI_API_BASE") or "https://generativelanguage.googleapis.com/v1beta/models"
+).rstrip("/")
+GEMINI_ROUTE_MIN_CONFIDENCE = float(os.environ.get("GEMINI_ROUTE_MIN_CONFIDENCE") or "0.7")
 
 LEAD_CAPTURE_WEBHOOK_URL = (os.environ.get("LEAD_CAPTURE_WEBHOOK_URL") or "").strip()
 CAPTURE_WEBHOOK_SECRET = (os.environ.get("CAPTURE_WEBHOOK_SECRET") or "").strip()
@@ -906,6 +914,31 @@ SALUDO_EXACTO_NORMALIZADO = {
     "?",
 }
 
+GEMINI_ROUTE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "origen": {"type": ["string", "null"], "description": "Municipio o ciudad de origen."},
+        "destino": {"type": ["string", "null"], "description": "Municipio o ciudad de destino."},
+        "vehiculo": {
+            "type": ["string", "null"],
+            "description": "Configuracion vehicular canonica. Si aplica, usa una opcion como C3S3, C3S2, C2S3, C2S2, C2910, C2M10, C3 o V3.",
+        },
+        "carroceria": {
+            "type": ["string", "null"],
+            "description": "Carroceria canonica valida si se puede inferir, por ejemplo General - Estacas, General - Furgon, Portacontenedores, Furgon Refrigerado, Granel Solido - Volco o Granel Liquido - Tanque.",
+        },
+        "horas": {"type": ["number", "null"], "description": "Horas logisticas solicitadas, si aplica."},
+        "toneladas": {"type": ["number", "null"], "description": "Toneladas solicitadas, si aplica."},
+        "confidence": {"type": "number", "description": "Nivel de confianza entre 0 y 1."},
+        "missing_fields": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Campos aun faltantes para la consulta.",
+        },
+    },
+    "required": ["origen", "destino", "vehiculo", "carroceria", "horas", "toneladas", "confidence", "missing_fields"],
+}
+
 
 def es_saludo_o_ayuda_simple(texto: str) -> bool:
     texto_normalizado = normalizar_texto_libre(texto)
@@ -1574,6 +1607,181 @@ def extract_response_text(data: dict) -> str | None:
     return "\n".join(parts) if parts else None
 
 
+def extract_gemini_response_text(data: dict) -> str | None:
+    for candidate in data.get("candidates") or []:
+        content = candidate.get("content") or {}
+        for part in content.get("parts") or []:
+            text = (part.get("text") or "").strip()
+            if text:
+                return text
+    return None
+
+
+def should_try_gemini_route_fallback(user_text: str, analisis_busqueda: dict) -> bool:
+    if not GEMINI_API_KEY or not GEMINI_ENABLED:
+        return False
+    if es_saludo_simple(user_text):
+        return False
+
+    texto_normalizado = normalizar_texto_libre(analisis_busqueda.get("cleaned_text") or user_text)
+    if texto_normalizado in {"AYUDA", "OPCIONES", "CONFIGURACION", "CAMBIAR CONFIGURACION"}:
+        return False
+
+    municipios = analisis_busqueda.get("municipios_detected") or []
+    if municipios:
+        return True
+
+    palabras = [p for p in texto_normalizado.split() if p]
+    return len(palabras) >= 3
+
+
+def normalize_gemini_route_extraction(payload: dict | None) -> dict | None:
+    if not payload:
+        return None
+
+    origen_raw = str(payload.get("origen") or "").strip()
+    destino_raw = str(payload.get("destino") or "").strip()
+    origen_resuelto = resolver_municipio_cache(origen_raw) if origen_raw else None
+    destino_resuelto = resolver_municipio_cache(destino_raw) if destino_raw else None
+
+    try:
+        confidence = float(payload.get("confidence") or 0)
+    except Exception:
+        confidence = 0.0
+
+    route = None
+    if origen_resuelto and destino_resuelto:
+        route = {
+            "origen": normalizar_ciudad(origen_resuelto.get("nombre_oficial") or origen_raw),
+            "destino": normalizar_ciudad(destino_resuelto.get("nombre_oficial") or destino_raw),
+            "codigo_dane_origen": origen_resuelto.get("codigo_dane"),
+            "codigo_dane_destino": destino_resuelto.get("codigo_dane"),
+        }
+    elif origen_raw and destino_raw and confidence >= GEMINI_ROUTE_MIN_CONFIDENCE:
+        route = {
+            "origen": normalizar_ciudad((origen_resuelto or {}).get("nombre_oficial") or origen_raw),
+            "destino": normalizar_ciudad((destino_resuelto or {}).get("nombre_oficial") or destino_raw),
+        }
+        if origen_resuelto:
+            route["codigo_dane_origen"] = origen_resuelto.get("codigo_dane")
+        if destino_resuelto:
+            route["codigo_dane_destino"] = destino_resuelto.get("codigo_dane")
+
+    vehiculo = parsear_vehiculo(str(payload.get("vehiculo") or ""))
+    carroceria = parsear_carroceria(str(payload.get("carroceria") or ""))
+
+    horas = payload.get("horas")
+    if horas is not None:
+        try:
+            horas = float(horas)
+        except Exception:
+            horas = parsear_horas_personalizadas(str(horas))
+
+    toneladas = payload.get("toneladas")
+    if toneladas is not None:
+        try:
+            toneladas = float(toneladas)
+        except Exception:
+            toneladas = parsear_toneladas(str(toneladas))
+
+    missing_fields = payload.get("missing_fields")
+    if not isinstance(missing_fields, list):
+        missing_fields = []
+
+    return {
+        "route": route,
+        "vehiculo": vehiculo,
+        "carroceria": carroceria,
+        "horas": horas,
+        "toneladas": toneladas,
+        "confidence": confidence,
+        "missing_fields": missing_fields,
+        "raw": payload,
+    }
+
+
+def extraer_json_ruta_gemini(user_text: str, analisis_busqueda: dict, state: dict) -> dict | None:
+    if not should_try_gemini_route_fallback(user_text, analisis_busqueda):
+        return None
+
+    prompt = (
+        "Extrae un JSON para consulta SICETAC desde un mensaje de WhatsApp. "
+        "No respondas texto adicional. "
+        "Detecta solo origen, destino, vehiculo, carroceria, horas y toneladas si realmente aparecen o se pueden inferir con alta confianza. "
+        "Si no se puede inferir algo, devuelve null. "
+        "Los usuarios pueden escribir configuraciones sin la C, por ejemplo 3S3 o 2S2. "
+        "Si identificas vehiculo, devuelve siempre la version canonica con C. "
+        "Si identificas carroceria, devuelve una opcion canonica valida. "
+        "No inventes rutas, no inventes municipios."
+    )
+    context_payload = {
+        "message": user_text,
+        "cleaned_text": analisis_busqueda.get("cleaned_text") or user_text,
+        "matched_intent_pattern": analisis_busqueda.get("matched_intent_pattern"),
+        "municipios_detected": analisis_busqueda.get("municipios_detected") or [],
+        "last_route": state.get("last_route"),
+        "supported_vehicles": VEHICULOS_VALIDOS,
+        "supported_body_alias_examples": [
+            "estacas",
+            "furgon",
+            "frio",
+            "refrigerado",
+            "contenedor",
+            "portacontenedores",
+            "granel",
+            "volco",
+            "tanque",
+        ],
+    }
+
+    try:
+        resp = requests.post(
+            f"{GEMINI_API_BASE}/{GEMINI_MODEL}:generateContent",
+            headers={
+                "x-goog-api-key": GEMINI_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json={
+                "contents": [
+                    {
+                        "parts": [
+                            {"text": prompt},
+                            {"text": f"CONTEXTO_JSON: {json.dumps(context_payload, ensure_ascii=False)}"},
+                        ]
+                    }
+                ],
+                "generationConfig": {
+                    "responseMimeType": "application/json",
+                    "responseJsonSchema": GEMINI_ROUTE_JSON_SCHEMA,
+                },
+            },
+            timeout=20,
+        )
+        if resp.status_code >= 400:
+            logger.error(f"Gemini error {resp.status_code}: {resp.text}")
+            return None
+
+        data = resp.json()
+        response_text = extract_gemini_response_text(data)
+        if not response_text:
+            return None
+
+        parsed = json.loads(response_text)
+        normalized = normalize_gemini_route_extraction(parsed)
+        if normalized:
+            logger.info(
+                "Gemini fallback parsed: route=%s vehiculo=%s carroceria=%s confidence=%s",
+                bool(normalized.get("route")),
+                normalized.get("vehiculo"),
+                normalized.get("carroceria"),
+                normalized.get("confidence"),
+            )
+        return normalized
+    except Exception as e:
+        logger.error(f"Gemini exception: {e}")
+        return None
+
+
 def generar_respuesta_ia(
     *,
     phone: str,
@@ -1887,12 +2095,15 @@ def send_body_selector(to: str, group_key: str):
 async def health():
     return {
         "service": "atica-whatsapp-bridge",
-        "version": "3.3.0",
+        "version": app.version,
         "status": "running",
         "sicetac_api": SICETAC_API_BASE,
         "openai_enabled": bool(OPENAI_API_KEY and OPENAI_FALLBACK_ENABLED),
         "openai_configured": bool(OPENAI_API_KEY),
         "openai_fallback_enabled": OPENAI_FALLBACK_ENABLED,
+        "gemini_enabled": bool(GEMINI_API_KEY and GEMINI_ENABLED),
+        "gemini_configured": bool(GEMINI_API_KEY),
+        "gemini_model": GEMINI_MODEL if GEMINI_API_KEY else None,
         "lead_capture_enabled": bool(LEAD_CAPTURE_WEBHOOK_URL),
         "timestamp": datetime.utcnow().isoformat(),
     }
@@ -2111,6 +2322,7 @@ async def receive_message(request: Request):
         return {"status": "unsupported vacio"}
 
     analisis_busqueda = analizar_texto_busqueda(user_text)
+    gemini_extraction = None
     ruta, ruta_en_mensaje_actual = resolver_contexto_consulta(analisis_busqueda.get("cleaned_text") or user_text, state)
     vehiculo_consultado = detectar_pregunta_configuracion(user_text)
     if vehiculo_consultado and not ruta:
@@ -2156,6 +2368,22 @@ async def receive_message(request: Request):
         return {"status": "preference captured without route"}
 
     if not ruta:
+        gemini_extraction = extraer_json_ruta_gemini(user_text, analisis_busqueda, state)
+        if gemini_extraction:
+            analisis_busqueda["gemini_extraction"] = {
+                "route_found": bool(gemini_extraction.get("route")),
+                "vehiculo": gemini_extraction.get("vehiculo"),
+                "carroceria": gemini_extraction.get("carroceria"),
+                "horas": gemini_extraction.get("horas"),
+                "toneladas": gemini_extraction.get("toneladas"),
+                "confidence": gemini_extraction.get("confidence"),
+                "missing_fields": gemini_extraction.get("missing_fields"),
+            }
+            if gemini_extraction.get("route"):
+                ruta = gemini_extraction["route"]
+                ruta_en_mensaje_actual = True
+
+    if not ruta:
         fallback_reply = construir_respuesta_ruta_faltante(user_text, analisis_busqueda, state)
         send_whatsapp_message(to=from_number, body=fallback_reply)
         capture_lead_event(
@@ -2170,8 +2398,8 @@ async def receive_message(request: Request):
         )
         return {"status": "no route parsed"}
 
-    vehiculo_detectado = parsear_vehiculo(user_text)
-    carroceria_detectada = parsear_carroceria(user_text)
+    vehiculo_detectado = parsear_vehiculo(user_text) or (gemini_extraction or {}).get("vehiculo")
+    carroceria_detectada = parsear_carroceria(user_text) or (gemini_extraction or {}).get("carroceria")
     if ruta_en_mensaje_actual:
         vehiculo = vehiculo_detectado or get_preferred_vehicle(state)
         carroceria = carroceria_detectada or get_preferred_body_type(state)
@@ -2180,7 +2408,11 @@ async def receive_message(request: Request):
         carroceria = carroceria_detectada or (state.get("last_route") or {}).get("carroceria") or get_preferred_body_type(state)
     modo_viaje = parsear_modo_viaje(user_text)
     horas_personalizadas = parsear_horas_personalizadas(user_text)
+    if horas_personalizadas is None:
+        horas_personalizadas = (gemini_extraction or {}).get("horas")
     toneladas_explicitas = parsear_toneladas(user_text)
+    if toneladas_explicitas is None:
+        toneladas_explicitas = (gemini_extraction or {}).get("toneladas")
     pide_valor_ton = usuario_pide_valor_por_tonelada(user_text)
     pide_horas = usuario_pide_otra_hora(user_text)
     uso_default_vehiculo = vehiculo_detectado is None and (
