@@ -62,6 +62,33 @@ VEHICULOS_VALIDOS = [
 DEFAULT_VEHICULO = "C3S3"
 DEFAULT_CARROCERIA = "General - Estacas"
 
+MANUAL_MUNICIPIO_ALIASES = {
+    "BOGOTA": {"nombre_oficial": "BOGOTÁ, D.C.", "codigo_dane": "11001000", "departamento": "BOGOTÁ, D.C."},
+    "BOGOTA DC": {"nombre_oficial": "BOGOTÁ, D.C.", "codigo_dane": "11001000", "departamento": "BOGOTÁ, D.C."},
+    "CALI": {"nombre_oficial": "SANTIAGO DE CALI", "codigo_dane": "76001000", "departamento": "VALLE DEL CAUCA"},
+    "MEDELLIN": {"nombre_oficial": "MEDELLÍN", "codigo_dane": "05001000", "departamento": "ANTIOQUIA"},
+    "BARRANQUILLA": {"nombre_oficial": "BARRANQUILLA", "codigo_dane": "08001000", "departamento": "ATLÁNTICO"},
+    "CARTAGENA": {"nombre_oficial": "CARTAGENA DE INDIAS", "codigo_dane": "13001000", "departamento": "BOLÍVAR"},
+    "BUCARAMANGA": {"nombre_oficial": "BUCARAMANGA", "codigo_dane": "68001000", "departamento": "SANTANDER"},
+    "PEREIRA": {"nombre_oficial": "PEREIRA", "codigo_dane": "66001000", "departamento": "RISARALDA"},
+    "BUENAVENTURA": {"nombre_oficial": "BUENAVENTURA", "codigo_dane": "76109000", "departamento": "VALLE DEL CAUCA"},
+    "JAMUNDI": {"nombre_oficial": "JAMUNDÍ", "codigo_dane": "76364000", "departamento": "VALLE DEL CAUCA"},
+    "PUERTO SALGAR": {"nombre_oficial": "PUERTO SALGAR", "codigo_dane": "25572000", "departamento": "CUNDINAMARCA"},
+    "FUNZA": {"nombre_oficial": "FUNZA", "codigo_dane": "25286000", "departamento": "CUNDINAMARCA"},
+    "YUMBO": {"nombre_oficial": "YUMBO", "codigo_dane": "76892000", "departamento": "VALLE DEL CAUCA"},
+    "TOCANCIPA": {"nombre_oficial": "TOCANCIPÁ", "codigo_dane": "25817000", "departamento": "CUNDINAMARCA"},
+    "ZIPAQUIRA": {"nombre_oficial": "ZIPAQUIRÁ", "codigo_dane": "25899000", "departamento": "CUNDINAMARCA"},
+    "GIRON": {"nombre_oficial": "GIRÓN", "codigo_dane": "68307000", "departamento": "SANTANDER"},
+    "ESPINAL": {"nombre_oficial": "ESPINAL", "codigo_dane": "73319000", "departamento": "TOLIMA"},
+    "ENVIGADO": {"nombre_oficial": "ENVIGADO", "codigo_dane": "05266000", "departamento": "ANTIOQUIA"},
+    "ITAGUI": {"nombre_oficial": "ITAGÜÍ", "codigo_dane": "05360000", "departamento": "ANTIOQUIA"},
+    "ARAUCA": {"nombre_oficial": "ARAUCA", "codigo_dane": "81001000", "departamento": "ARAUCA"},
+    "CARTAGO": {"nombre_oficial": "CARTAGO", "codigo_dane": "76147000", "departamento": "VALLE DEL CAUCA"},
+    "CALARCA": {"nombre_oficial": "CALARCÁ", "codigo_dane": "63130000", "departamento": "QUINDÍO"},
+    "LA TEBAIDA": {"nombre_oficial": "LA TEBAIDA", "codigo_dane": "63401000", "departamento": "QUINDÍO"},
+    "SOGAMOSO": {"nombre_oficial": "SOGAMOSO", "codigo_dane": "15759000", "departamento": "BOYACÁ"},
+}
+
 BODY_TYPE_OPTIONS = [
     "General - Estacas",
     "General - Furgon",
@@ -363,6 +390,19 @@ def ensure_municipios_cache() -> None:
                 current = aliases.get(clave)
                 if not current or candidate["_priority"] > current.get("_priority", (0, 0)):
                     aliases[clave] = candidate
+        for alias_text, info in MANUAL_MUNICIPIO_ALIASES.items():
+            clave = normalizar_texto_libre(alias_text)
+            if not clave:
+                continue
+            candidate = {
+                "codigo_dane": info.get("codigo_dane"),
+                "nombre_oficial": info.get("nombre_oficial"),
+                "departamento": info.get("departamento"),
+                "_priority": (120, -len(clave)),
+            }
+            current = aliases.get(clave)
+            if not current or candidate["_priority"] > current.get("_priority", (0, 0)):
+                aliases[clave] = candidate
         ordered_aliases = sorted(aliases.keys(), key=len, reverse=True)
         for value in aliases.values():
             value.pop("_priority", None)
@@ -451,8 +491,9 @@ def extraer_municipios_en_texto(texto: str) -> list[dict]:
         start = texto_normalizado.find(patron)
         if start == -1:
             continue
-        end = start + len(patron)
-        if any(not (end <= s or start >= e) for s, e in spans_ocupados):
+        start_content = start + 1
+        end_content = start_content + len(alias)
+        if any(not (end_content <= s or start_content >= e) for s, e in spans_ocupados):
             continue
         info = aliases.get(alias)
         if not info:
@@ -460,14 +501,14 @@ def extraer_municipios_en_texto(texto: str) -> list[dict]:
         encontrados.append(
             {
                 "match": alias,
-                "start": start,
-                "end": end,
+                "start": start_content,
+                "end": end_content,
                 "codigo_dane": info.get("codigo_dane"),
                 "nombre_oficial": info.get("nombre_oficial"),
                 "departamento": info.get("departamento"),
             }
         )
-        spans_ocupados.append((start, end))
+        spans_ocupados.append((start_content, end_content))
 
     encontrados.sort(key=lambda item: item["start"])
     unicos: list[dict] = []
@@ -569,17 +610,106 @@ def normalizar_ciudad(texto: str) -> str:
     return alias.get(texto, texto)
 
 
+ROUTE_PREFIX_RE = re.compile(
+    r"^(?:"
+    r"valor por tonelada|por tonelada|cuanto por tonelada|cuánto por tonelada|valor por ton|por ton|"
+    r"hola(?:\s+atica)?|buenos días|buenos dias|buen día|buen dia|buenas tardes|buenas noches|"
+    r"buena noche|buenas|buenasndias|consulta|consultar|ruta|flete ruta|flete|tarifa|"
+    r"cuanto cuesta|cuánto cuesta|precio|calcular ruta|calcular|valor|costo|ahora|ok|"
+    r"bueno|entonces|atica"
+    r")\b[\s,.:;\-]*",
+    re.IGNORECASE,
+)
+
+
+def limpiar_prefijos_ruta(texto: str) -> str:
+    cleaned = (texto or "").strip()
+    while cleaned:
+        updated = ROUTE_PREFIX_RE.sub("", cleaned, count=1).strip()
+        if updated == cleaned or not updated:
+            return cleaned
+        cleaned = updated
+    return cleaned
+
+
+def limpiar_linea_estructurada(linea: str) -> str:
+    cleaned = re.sub(r"^[\-\*\u2022]+\s*", "", (linea or "").strip())
+    cleaned = re.sub(
+        r"^(?:ruta|origen|destino|tipo de vehiculo|tipo de vehículo|tipo de carga|carroceria|carrocería|"
+        r"vehiculo|vehículo|configuracion|configuración|horas de cargue y descargue|horas logisticas|"
+        r"horas logísticas)[:\s-]*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    return cleaned.strip()
+
+
+def parsear_ruta_por_lineas(texto: str) -> dict | None:
+    lineas = [linea.strip() for linea in re.split(r"[\r\n]+", texto or "") if linea.strip()]
+    if len(lineas) < 2:
+        return None
+
+    origen_linea = None
+    destino_linea = None
+    rutas_candidatas: list[str] = []
+    lineas_municipio: list[dict] = []
+
+    for linea in lineas:
+        linea_limpia = limpiar_linea_estructurada(linea)
+        if not linea_limpia:
+            continue
+        if re.match(r"^\s*ruta[:\s-]+", linea, re.IGNORECASE):
+            rutas_candidatas.append(linea_limpia)
+            continue
+        if re.match(r"^\s*origen[:\s-]+", linea, re.IGNORECASE):
+            origen_linea = linea_limpia
+            continue
+        if re.match(r"^\s*destino[:\s-]+", linea, re.IGNORECASE):
+            destino_linea = linea_limpia
+            continue
+        if parsear_vehiculo(linea_limpia) or parsear_carroceria(linea_limpia):
+            continue
+        if parsear_horas_personalizadas(linea_limpia) or parsear_toneladas(linea_limpia):
+            continue
+        rutas_candidatas.append(linea_limpia)
+
+    if origen_linea and destino_linea:
+        origen_resuelto = resolver_municipio_cache(origen_linea)
+        destino_resuelto = resolver_municipio_cache(destino_linea)
+        if origen_resuelto and destino_resuelto:
+            return {
+                "origen": normalizar_ciudad(origen_resuelto.get("nombre_oficial") or origen_linea),
+                "destino": normalizar_ciudad(destino_resuelto.get("nombre_oficial") or destino_linea),
+                "codigo_dane_origen": origen_resuelto.get("codigo_dane"),
+                "codigo_dane_destino": destino_resuelto.get("codigo_dane"),
+            }
+
+    for candidata in rutas_candidatas:
+        ruta = parsear_ruta(candidata) if candidata != texto else None
+        if ruta:
+            return ruta
+        municipio = resolver_municipio_cache(candidata)
+        if municipio:
+            lineas_municipio.append(municipio)
+
+    if len(lineas_municipio) >= 2:
+        return {
+            "origen": normalizar_ciudad(lineas_municipio[0].get("nombre_oficial") or ""),
+            "destino": normalizar_ciudad(lineas_municipio[1].get("nombre_oficial") or ""),
+            "codigo_dane_origen": lineas_municipio[0].get("codigo_dane"),
+            "codigo_dane_destino": lineas_municipio[1].get("codigo_dane"),
+        }
+    return None
+
+
 def parsear_ruta(texto: str) -> dict | None:
     texto_base, _ = strip_intent_prefixes(texto)
-    texto = texto_base.strip().lower()
-    texto = re.sub(
-        r"^(valor por tonelada|por tonelada|cuanto por tonelada|cuánto por tonelada|valor por ton|por ton|"
-        r"hola|buenos días|buenas tardes|buenas noches|buenas|consulta|consultar|"
-        r"ruta|flete|tarifa|cuanto cuesta|cuánto cuesta|precio|calcular|calcular ruta|"
-        r"valor|costo|ahora|ok|bueno|entonces)\s*[,.:;]?\s*",
-        "",
-        texto,
-    )
+    ruta_por_lineas = parsear_ruta_por_lineas(texto_base)
+    if ruta_por_lineas:
+        return ruta_por_lineas
+
+    texto = limpiar_prefijos_ruta(texto_base).lower()
 
     patterns = [
         r"^(?:(?:de|desde)\s+)?(.+?)\s+a\s+(.+)$",
@@ -736,6 +866,54 @@ def mensaje_configuracion_vehiculo(vehiculo: str) -> str:
     lineas.append("")
     lineas.append(f"Si quieres, te calculo una ruta con esa configuracion. Escribeme por ejemplo: Bogota a Barranquilla {vehiculo}")
     return "\n".join(lineas)
+
+
+def es_saludo_simple(texto: str) -> bool:
+    texto_normalizado = normalizar_texto_libre(texto)
+    saludos = {
+        "HOLA",
+        "HOLA AMIGO",
+        "HOLA ATICA",
+        "BUEN DIA",
+        "BUEN DÍA",
+        "BUENOS DIAS",
+        "BUENOS DÍAS",
+        "BUENAS TARDES",
+        "BUENAS NOCHES",
+        "BUENA NOCHE",
+        "BUENASNDIAS",
+        "ESTAS",
+        "ESTAS ?",
+    }
+    if texto_normalizado in saludos:
+        return True
+    return len(texto_normalizado.split()) <= 4 and any(
+        palabra in texto_normalizado for palabra in ["HOLA", "BUEN", "BUENOS", "BUENAS", "ESTAS", "COMO ESTAS"]
+    )
+
+
+def construir_respuesta_ruta_faltante(user_text: str, analisis_busqueda: dict, state: dict) -> str:
+    municipios = analisis_busqueda.get("municipios_detected") or []
+    vehiculo = parsear_vehiculo(user_text)
+    carroceria = parsear_carroceria(user_text)
+
+    if es_saludo_simple(user_text):
+        return "Escribeme la ruta asi: Bogota a Barranquilla."
+
+    if vehiculo or carroceria:
+        if state.get("last_route"):
+            return "Ya tengo ese cambio. Si quieres otra ruta, escribela asi: origen a destino."
+        return "Ya tengo esa configuracion. Ahora escribeme la ruta: origen a destino."
+
+    if len(municipios) == 1:
+        ciudad = quitar_tildes(municipios[0].get("nombre_oficial") or "")
+        return f"Ya tengo {ciudad}. Ahora escribeme el otro punto asi: origen a destino."
+
+    texto_normalizado = normalizar_texto_libre(user_text)
+    if any(palabra in texto_normalizado for palabra in ["EXCEL", "PROMEDIO", "AUMENTO", "MERCADO", "PLAZA"]):
+        return "Hoy te ayudo con rutas SICETAC. Escribeme una asi: Bogota a Barranquilla."
+
+    return "Te ayudo. Escribeme la ruta en una sola linea: origen a destino."
 
 
 def extraer_email(texto: str) -> str | None:
@@ -955,6 +1133,7 @@ def usuario_quiere_cambiar_configuracion(texto: str) -> bool:
         or "CAMBIAR VEHICULO" in texto_normalizado
         or "CAMBIAR CARROCERIA" in texto_normalizado
         or "CAMBIAR CARROCERIA" in texto_normalizado
+        or texto_normalizado.strip() in {"CONFIGURACION", "CONFIGURACIÓN", "CARROCERIA", "CARROCERÍA"}
     )
 
 
@@ -1359,7 +1538,12 @@ def resolver_contexto_consulta(user_text: str, state: dict) -> tuple[dict | None
     if ruta_detectada:
         return ruta_detectada, True
 
-    requiere_contexto_anterior = usuario_pide_valor_por_tonelada(user_text) or usuario_pide_otra_hora(user_text)
+    requiere_contexto_anterior = (
+        usuario_pide_valor_por_tonelada(user_text)
+        or usuario_pide_otra_hora(user_text)
+        or bool(parsear_vehiculo(user_text))
+        or bool(parsear_carroceria(user_text))
+    )
     if requiere_contexto_anterior and state.get("last_route"):
         last_route = state["last_route"]
         return {
@@ -1763,12 +1947,7 @@ async def receive_message(request: Request):
         return {"status": "vehicle info sent"}
 
     if not ruta:
-        fallback_reply = (
-            "No pude identificar la ruta.\n\n"
-            "Escribela directo asi:\n"
-            "Bogota a Barranquilla\n"
-            "Medellin a Cartagena"
-        )
+        fallback_reply = construir_respuesta_ruta_faltante(user_text, analisis_busqueda, state)
         send_whatsapp_message(to=from_number, body=fallback_reply)
         capture_lead_event(
             {
