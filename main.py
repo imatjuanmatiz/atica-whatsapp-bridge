@@ -342,7 +342,8 @@ def safe_description(texto: str | None, limit: int = 72) -> str | None:
 
 
 LEADING_ROUTE_FILLER_RE = re.compile(
-    r"^(?:(?:de\s+la\s+ruta|de\s+ruta|la\s+ruta|ruta|del\s+flete|el\s+flete|del\s+viaje|el\s+viaje)\b[\s,.:;\-]*)+",
+    r"^(?:(?:y\s+de|y|ahora\s+de|ahora|prueba\s+con|probemos\s+con|mira\s+con|revisa\s+con|"
+    r"de\s+la\s+ruta|de\s+ruta|la\s+ruta|ruta|del\s+flete|el\s+flete|del\s+viaje|el\s+viaje)\b[\s,.:;\-]*)+",
     re.IGNORECASE,
 )
 
