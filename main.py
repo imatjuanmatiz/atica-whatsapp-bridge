@@ -868,28 +868,60 @@ def mensaje_configuracion_vehiculo(vehiculo: str) -> str:
     return "\n".join(lineas)
 
 
-def es_saludo_simple(texto: str) -> bool:
+SALUDO_EXACTO_NORMALIZADO = {
+    "HOLA",
+    "HI",
+    "HELLO",
+    "HOLA ATICA",
+    "HOLA AMIGO",
+    "HOLA COMO ESTAS",
+    "HOLA CÓMO ESTÁS",
+    "BUEN DIA",
+    "BUEN DÍA",
+    "BUENOS DIAS",
+    "BUENOS DÍAS",
+    "BUENAS TARDES",
+    "BUENAS NOCHES",
+    "BUENA NOCHE",
+    "BUENAS",
+    "BUENASNDIAS",
+    "COMO VAS",
+    "COMO VA",
+    "CÓMO VAS",
+    "CÓMO VA",
+    "QUE TAL",
+    "QUÉ TAL",
+    "ESTAS",
+    "ESTAS ?",
+    "ESTÁS",
+    "ESTÁS ?",
+    "MENU",
+    "MENÚ",
+    "AYUDA",
+    "HELP",
+    "INICIO",
+    "START",
+    "?",
+}
+
+
+def es_saludo_o_ayuda_simple(texto: str) -> bool:
     texto_normalizado = normalizar_texto_libre(texto)
-    saludos = {
-        "HOLA",
-        "HOLA AMIGO",
-        "HOLA ATICA",
-        "BUEN DIA",
-        "BUEN DÍA",
-        "BUENOS DIAS",
-        "BUENOS DÍAS",
-        "BUENAS TARDES",
-        "BUENAS NOCHES",
-        "BUENA NOCHE",
-        "BUENASNDIAS",
-        "ESTAS",
-        "ESTAS ?",
-    }
-    if texto_normalizado in saludos:
+    if not texto_normalizado:
+        return False
+    if texto_normalizado in SALUDO_EXACTO_NORMALIZADO:
         return True
-    return len(texto_normalizado.split()) <= 4 and any(
-        palabra in texto_normalizado for palabra in ["HOLA", "BUEN", "BUENOS", "BUENAS", "ESTAS", "COMO ESTAS"]
-    )
+    palabras = texto_normalizado.split()
+    if len(palabras) > 5:
+        return False
+    if any(token.isdigit() for token in palabras):
+        return False
+    pistas = ["HOLA", "BUEN", "BUENOS", "BUENAS", "COMO", "CÓMO", "QUE TAL", "QUÉ TAL", "ESTAS", "ESTÁS"]
+    return any(pista in texto_normalizado for pista in pistas)
+
+
+def es_saludo_simple(texto: str) -> bool:
+    return es_saludo_o_ayuda_simple(texto)
 
 
 def construir_respuesta_ruta_faltante(user_text: str, analisis_busqueda: dict, state: dict) -> str:
@@ -1884,9 +1916,9 @@ async def receive_message(request: Request):
             return {"status": "preferred body updated"}
 
     texto_lower = user_text.lower().strip()
-    if texto_lower in ("hola", "hi", "hello", "ayuda", "help", "menu", "menú", "inicio", "start", "?"):
+    if es_saludo_o_ayuda_simple(user_text) and not parsear_ruta(user_text):
         send_whatsapp_message(to=from_number, body=mensaje_ayuda())
-        if texto_lower in ("ayuda", "help", "menu", "menú"):
+        if any(token in texto_lower for token in ("ayuda", "help", "menu", "menú")):
             send_configuration_menu(from_number)
         capture_lead_event(
             {
