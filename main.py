@@ -1048,13 +1048,6 @@ def descripcion_corta_vehiculo(vehiculo: str | None) -> str:
     return quitar_tildes(descripcion)
 
 
-def etiqueta_horas_logisticas(clave: str) -> str:
-    horas = {"H2": 2, "H4": 4, "H8": 8}.get((clave or "").strip().upper())
-    if horas is None:
-        return clave
-    return f"{clave.upper()} ({horas} horas logisticas)"
-
-
 def formatear_respuesta(data: dict, *, include_closing: bool = True) -> str:
     try:
         origen = quitar_tildes(data.get("origen", "?"))
@@ -1072,6 +1065,7 @@ def formatear_respuesta(data: dict, *, include_closing: bool = True) -> str:
         lineas = [
             f"Ruta: {origen} a {destino}",
             configuracion_linea,
+            "Referencia SICETAC presentada con H2, H4 y H8: 2, 4 y 8 horas logisticas.",
         ]
         if mes:
             lineas.append(f"Periodo: {mes}")
@@ -1089,20 +1083,20 @@ def formatear_respuesta(data: dict, *, include_closing: bool = True) -> str:
                     etiqueta += f" (ID {id_sice})"
                 lineas.append(etiqueta)
                 if tot.get("H2") is not None:
-                    lineas.append(f"{etiqueta_horas_logisticas('H2')}: {fmt_cop(tot.get('H2'))}")
+                    lineas.append(f"H2: {fmt_cop(tot.get('H2'))}")
                 if tot.get("H4") is not None:
-                    lineas.append(f"{etiqueta_horas_logisticas('H4')}: {fmt_cop(tot.get('H4'))}")
+                    lineas.append(f"H4: {fmt_cop(tot.get('H4'))}")
                 if tot.get("H8") is not None:
-                    lineas.append(f"{etiqueta_horas_logisticas('H8')}: {fmt_cop(tot.get('H8'))}")
+                    lineas.append(f"H8: {fmt_cop(tot.get('H8'))}")
         else:
             totales = data.get("totales", {})
             lineas.append("Valores SICETAC:")
             if totales.get("H2") is not None:
-                lineas.append(f"{etiqueta_horas_logisticas('H2')}: {fmt_cop(totales.get('H2'))}")
+                lineas.append(f"H2: {fmt_cop(totales.get('H2'))}")
             if totales.get("H4") is not None:
-                lineas.append(f"{etiqueta_horas_logisticas('H4')}: {fmt_cop(totales.get('H4'))}")
+                lineas.append(f"H4: {fmt_cop(totales.get('H4'))}")
             if totales.get("H8") is not None:
-                lineas.append(f"{etiqueta_horas_logisticas('H8')}: {fmt_cop(totales.get('H8'))}")
+                lineas.append(f"H8: {fmt_cop(totales.get('H8'))}")
 
         if include_closing:
             lineas.append("")
