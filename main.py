@@ -1,5 +1,5 @@
 """
-ATICA WhatsApp Bridge v3.4
+ATICA WhatsApp Bridge v3.4.1
 Conecta WhatsApp Cloud API con la API SICETAC y, de forma opcional,
 con modelos externos para extraer mejor la ruta cuando el parser por codigo
 no logra cerrarla.
@@ -19,7 +19,7 @@ import requests
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("atica-whatsapp")
 
-app = FastAPI(title="ATICA WhatsApp Bridge", version="3.4.0")
+app = FastAPI(title="ATICA WhatsApp Bridge", version="3.4.1")
 
 
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "aticatoken123")
