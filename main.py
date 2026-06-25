@@ -1,5 +1,5 @@
 """
-ATICA WhatsApp Bridge v3.4.1
+ATICA WhatsApp Bridge v3.4.2
 Conecta WhatsApp Cloud API con la API SICETAC y, de forma opcional,
 con modelos externos para extraer mejor la ruta cuando el parser por codigo
 no logra cerrarla.
@@ -19,7 +19,7 @@ import requests
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("atica-whatsapp")
 
-app = FastAPI(title="ATICA WhatsApp Bridge", version="3.4.1")
+app = FastAPI(title="ATICA WhatsApp Bridge", version="3.4.2")
 
 
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "aticatoken123")
@@ -354,7 +354,7 @@ LEADING_ROUTE_FILLER_RE = re.compile(
 
 
 def strip_intent_prefixes(texto: str) -> tuple[str, str | None]:
-    original = re.sub(r"\s+", " ", (texto or "").strip())
+    original = re.sub(r"\s+", " ", limpiar_modo_plus_texto(texto).strip())
     cleaned = original
     matched_pattern = None
 
@@ -370,6 +370,18 @@ def strip_intent_prefixes(texto: str) -> tuple[str, str | None]:
                     matched_pattern = matched_pattern or pattern
                 break
         if cleaned != previous:
+            continue
+
+        updated = re.sub(
+            r"^(?:modo\s+plus|consulta\s+plus|plus)\b[\s,.:;\-]*",
+            "",
+            cleaned,
+            count=1,
+            flags=re.IGNORECASE,
+        ).strip()
+        if updated and updated != cleaned:
+            cleaned = updated
+            matched_pattern = matched_pattern or "modo plus"
             continue
 
         updated = ROUTE_PREFIX_RE.sub("", cleaned, count=1).strip()
@@ -866,6 +878,13 @@ def parsear_modo_viaje(texto: str) -> str | None:
 
 
 def parsear_horas_personalizadas(texto: str) -> float | None:
+    match_h_prefix = re.search(r"\bH\s*(\d+(?:[.,]\d+)?)\b", texto, re.IGNORECASE)
+    if match_h_prefix:
+        try:
+            return float(match_h_prefix.group(1).replace(",", "."))
+        except Exception:
+            return None
+
     match = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:horas|hora|hrs|hr|h)\b", texto, re.IGNORECASE)
     if not match:
         return None
@@ -904,6 +923,29 @@ def usuario_pide_otra_hora(texto: str) -> bool:
 def usuario_pide_vacio(texto: str) -> bool:
     texto_lower = texto.lower()
     return "vacio" in texto_lower or "vacío" in texto_lower
+
+
+def usuario_pide_modo_plus(texto: str) -> bool:
+    texto_normalizado = normalizar_texto_libre(texto)
+    if re.search(r"(?:^|[,;:\s-])(?:modo\s+plus|consulta\s+plus)(?:$|[,;:\s-])", texto_normalizado, re.IGNORECASE):
+        return True
+    triggers = [
+        "TODAS LAS CONFIGURACIONES",
+        "TODOS LOS VEHICULOS",
+        "TODAS LAS CONFIGURACIONES DISPONIBLES",
+    ]
+    return any(trigger in texto_normalizado for trigger in triggers)
+
+
+def limpiar_modo_plus_texto(texto: str | None) -> str:
+    cleaned = str(texto or "")
+    cleaned = re.sub(
+        r"(?:[,;:\s\-]+)?(?:modo\s+plus|consulta\s+plus|todas\s+las\s+configuraciones(?:\s+disponibles)?|todos\s+los\s+vehiculos)\b",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(r"\s+", " ", cleaned).strip()
 
 
 def detectar_pregunta_configuracion(texto: str) -> str | None:
@@ -1517,6 +1559,143 @@ def consultar_sicetac(
     except Exception as e:
         logger.error(f"SICETAC exception: {e}")
         return None
+
+
+def get_plus_vehicles() -> list[str]:
+    ensure_vehiculos_cache()
+    details = VEHICULOS_CACHE.get("details") or {}
+    if details:
+        return [vehiculo for vehiculo in VEHICULOS_VALIDOS if vehiculo in details]
+    return VEHICULOS_VALIDOS[:]
+
+
+def seleccionar_variante_principal(data: dict | None) -> dict | None:
+    if not data:
+        return None
+    variantes = ordenar_variantes_sicetac(data.get("variantes") or [])
+    if variantes:
+        return variantes[0]
+    return None
+
+
+def extraer_id_sice_principal(data: dict | None) -> str | None:
+    variante = seleccionar_variante_principal(data)
+    if variante and variante.get("ID_SICE") is not None:
+        return str(variante.get("ID_SICE"))
+    if data and data.get("ID_SICE") is not None:
+        return str(data.get("ID_SICE"))
+    return None
+
+
+def consultar_modo_plus(
+    *,
+    ruta: dict,
+    carroceria: str | None,
+    modo_viaje: str | None,
+    horas: float = 4.0,
+) -> dict:
+    filas: list[dict] = []
+    route_id = None
+    mes = None
+
+    for vehiculo in get_plus_vehicles():
+        resultado = consultar_sicetac(
+            origen=ruta["origen"],
+            destino=ruta["destino"],
+            vehiculo=vehiculo,
+            carroceria=carroceria,
+            modo_viaje=modo_viaje,
+            codigo_dane_origen=ruta.get("codigo_dane_origen"),
+            codigo_dane_destino=ruta.get("codigo_dane_destino"),
+        )
+
+        if resultado is None:
+            filas.append({"vehiculo": vehiculo, "error": "timeout"})
+            continue
+        if resultado.get("_error"):
+            filas.append({
+                "vehiculo": vehiculo,
+                "error": resultado.get("_detail") or f"error {resultado.get('_status')}",
+            })
+            continue
+
+        valor = calcular_total_para_horas(resultado, horas)
+        id_sice = extraer_id_sice_principal(resultado)
+        if route_id is None and id_sice:
+            route_id = id_sice
+        if mes is None and resultado.get("mes"):
+            mes = resultado.get("mes")
+        filas.append({
+            "vehiculo": vehiculo,
+            "valor": valor,
+            "id_sice": id_sice,
+        })
+
+    return {
+        "origen": ruta["origen"],
+        "destino": ruta["destino"],
+        "carroceria": carroceria or DEFAULT_CARROCERIA,
+        "horas": float(horas),
+        "route_id": route_id,
+        "mes": mes,
+        "filas": filas,
+    }
+
+
+def formatear_modo_plus(data: dict) -> str:
+    horas = float(data.get("horas") or 4)
+    horas_label = fmt_decimal(horas) or str(horas)
+    origen = quitar_tildes(data.get("origen") or "?")
+    destino = quitar_tildes(data.get("destino") or "?")
+    carroceria = quitar_tildes(data.get("carroceria") or DEFAULT_CARROCERIA)
+
+    lineas = [
+        f"PLUS SICETAC H{horas_label}",
+        f"Ruta: {origen} a {destino}",
+    ]
+    if data.get("route_id"):
+        lineas.append(f"Ruta ID: {data.get('route_id')}")
+    if data.get("mes"):
+        lineas.append(f"Periodo: {data.get('mes')}")
+    lineas.append(f"Carroceria: {carroceria}")
+    lineas.append("")
+
+    filas = data.get("filas") or []
+    exitosas = [fila for fila in filas if fila.get("valor") is not None]
+    fallidas = [fila for fila in filas if fila.get("valor") is None]
+
+    for fila in exitosas:
+        lineas.append(f"{fila.get('vehiculo')}: {fmt_cop(fila.get('valor'))}")
+
+    if fallidas and not exitosas:
+        lineas.append("No pude calcular las configuraciones para esta ruta.")
+    elif fallidas:
+        lineas.append(f"No disponibles: {', '.join(str(f.get('vehiculo')) for f in fallidas)}")
+
+    lineas.append("")
+    lineas.append("Modo plus usa 4 horas logisticas.")
+    lineas.append("Para otra hora, escribe la ruta y H6, H8 o el numero de horas que quieras.")
+    return "\n".join(lineas)
+
+
+def build_plus_snapshot(data: dict) -> dict:
+    return {
+        "origen": data.get("origen"),
+        "destino": data.get("destino"),
+        "carroceria": data.get("carroceria"),
+        "horas": data.get("horas"),
+        "route_id": data.get("route_id"),
+        "mes": data.get("mes"),
+        "rows": [
+            {
+                "vehiculo": fila.get("vehiculo"),
+                "valor": fila.get("valor"),
+                "id_sice": fila.get("id_sice"),
+                "error": fila.get("error"),
+            }
+            for fila in (data.get("filas") or [])
+        ],
+    }
 
 
 def build_sicetac_snapshot(data: dict | None) -> dict | None:
@@ -2621,6 +2800,41 @@ async def receive_message(request: Request):
         set_preferred_vehicle(state, vehiculo_detectado)
     if carroceria_detectada:
         set_preferred_body_type(state, carroceria_detectada)
+
+    if usuario_pide_modo_plus(user_text):
+        resultado_plus = consultar_modo_plus(
+            ruta=ruta,
+            carroceria=carroceria,
+            modo_viaje=modo_viaje,
+            horas=4.0,
+        )
+        state["last_route"] = {
+            "origen": ruta["origen"],
+            "destino": ruta["destino"],
+            "vehiculo": "PLUS",
+            "carroceria": carroceria,
+            "modo_viaje": modo_viaje,
+            "consulted_at": utcnow_iso(),
+        }
+        send_whatsapp_message(to=from_number, body=formatear_modo_plus(resultado_plus))
+        capture_lead_event(
+            {
+                "event": "route_consulted_plus",
+                "ts": utcnow_iso(),
+                "channel": "whatsapp",
+                "lead": state["lead"],
+                "route": state["last_route"],
+                "sicetac_plus": build_plus_snapshot(resultado_plus),
+                "message": user_text,
+                "parse": analisis_busqueda,
+                "query": {
+                    "kind": "plus_h4_all_configurations",
+                    "requested_hours": 4.0,
+                    "vehicle_count": len(resultado_plus.get("filas") or []),
+                },
+            }
+        )
+        return {"status": "ok", "mode": "plus"}
 
     resultado = consultar_sicetac(
         origen=ruta["origen"],
