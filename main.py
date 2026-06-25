@@ -631,7 +631,11 @@ def normalizar_ciudad(texto: str) -> str:
     texto = texto.strip().title()
     alias = {
         "Bogota": "Bogotá",
+        "Bog": "Bogotá",
+        "Capital": "Bogotá",
+        "La Capital": "Bogotá",
         "Medellin": "Medellín",
+        "Medallo": "Medellín",
         "Barranquilla": "Barranquilla",
         "Cartagena": "Cartagena",
         "Bucaramanga": "Bucaramanga",
@@ -801,15 +805,13 @@ def parsear_ruta(texto: str) -> dict | None:
         destino_txt = recortar_destino(destino_raw)
         origen_resuelto = resolver_municipio_cache(origen_txt)
         destino_resuelto = resolver_municipio_cache(destino_txt)
-        origen = normalizar_ciudad((origen_resuelto or {}).get("nombre_oficial") or origen_txt)
-        destino = normalizar_ciudad((destino_resuelto or {}).get("nombre_oficial") or destino_txt)
-        if origen and destino:
-            ruta = {"origen": origen, "destino": destino}
-            if origen_resuelto:
-                ruta["codigo_dane_origen"] = origen_resuelto.get("codigo_dane")
-            if destino_resuelto:
-                ruta["codigo_dane_destino"] = destino_resuelto.get("codigo_dane")
-            return ruta
+        if origen_resuelto and destino_resuelto:
+            return {
+                "origen": normalizar_ciudad(origen_resuelto.get("nombre_oficial") or origen_txt),
+                "destino": normalizar_ciudad(destino_resuelto.get("nombre_oficial") or destino_txt),
+                "codigo_dane_origen": origen_resuelto.get("codigo_dane"),
+                "codigo_dane_destino": destino_resuelto.get("codigo_dane"),
+            }
     return inferir_ruta_con_municipios(texto)
 
 
