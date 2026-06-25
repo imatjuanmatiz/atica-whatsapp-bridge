@@ -37,7 +37,7 @@ REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT_MS", "30000")) / 1000
 MUNICIPIOS_CACHE_TTL_SECONDS = int(os.environ.get("MUNICIPIOS_CACHE_TTL_SECONDS", "3600"))
 
 OPENAI_API_KEY = (os.environ.get("OPENAI_API_KEY") or "").strip()
-OPENAI_MODEL = (os.environ.get("OPENAI_MODEL") or "gpt-5-mini").strip()
+OPENAI_MODEL = (os.environ.get("OPENAI_MODEL") or "gpt-5.4-nano").strip()
 OPENAI_API_URL = (os.environ.get("OPENAI_API_URL") or "https://api.openai.com/v1/responses").strip()
 OPENAI_FALLBACK_ENABLED = (
     (os.environ.get("OPENAI_FALLBACK_ENABLED") or "false").strip().lower() == "true"
@@ -1669,6 +1669,16 @@ def extract_gemini_response_text(data: dict) -> str | None:
 def should_try_gemini_route_fallback(user_text: str, analisis_busqueda: dict) -> bool:
     if not GEMINI_API_KEY or not GEMINI_ENABLED:
         return False
+    return should_try_route_fallback(user_text, analisis_busqueda)
+
+
+def should_try_openai_route_fallback(user_text: str, analisis_busqueda: dict) -> bool:
+    if not OPENAI_API_KEY or not OPENAI_FALLBACK_ENABLED:
+        return False
+    return should_try_route_fallback(user_text, analisis_busqueda)
+
+
+def should_try_route_fallback(user_text: str, analisis_busqueda: dict) -> bool:
     if es_saludo_simple(user_text):
         return False
 
@@ -1684,7 +1694,7 @@ def should_try_gemini_route_fallback(user_text: str, analisis_busqueda: dict) ->
     return len(palabras) >= 3
 
 
-def normalize_gemini_route_extraction(payload: dict | None) -> dict | None:
+def normalize_route_extraction(payload: dict | None) -> dict | None:
     if not payload:
         return None
 
@@ -1747,6 +1757,10 @@ def normalize_gemini_route_extraction(payload: dict | None) -> dict | None:
         "missing_fields": missing_fields,
         "raw": payload,
     }
+
+
+def normalize_gemini_route_extraction(payload: dict | None) -> dict | None:
+    return normalize_route_extraction(payload)
 
 
 def extraer_json_ruta_gemini(user_text: str, analisis_busqueda: dict, state: dict) -> dict | None:
@@ -1828,6 +1842,87 @@ def extraer_json_ruta_gemini(user_text: str, analisis_busqueda: dict, state: dic
         return normalized
     except Exception as e:
         logger.error(f"Gemini exception: {e}")
+        return None
+
+
+def extraer_json_ruta_openai(user_text: str, analisis_busqueda: dict, state: dict) -> dict | None:
+    if not should_try_openai_route_fallback(user_text, analisis_busqueda):
+        return None
+
+    context_payload = {
+        "message": user_text,
+        "cleaned_text": analisis_busqueda.get("cleaned_text") or user_text,
+        "matched_intent_pattern": analisis_busqueda.get("matched_intent_pattern"),
+        "municipios_detected": analisis_busqueda.get("municipios_detected") or [],
+        "last_route": state.get("last_route"),
+        "supported_vehicles": VEHICULOS_VALIDOS,
+        "supported_body_alias_examples": [
+            "estacas",
+            "furgon",
+            "frio",
+            "refrigerado",
+            "contenedor",
+            "portacontenedores",
+            "granel",
+            "volco",
+            "tanque",
+        ],
+    }
+
+    payload = {
+        "model": OPENAI_MODEL,
+        "instructions": (
+            "Extrae un JSON para consulta SICETAC desde un mensaje de WhatsApp. "
+            "No respondas texto adicional. "
+            "Devuelve solo un objeto JSON con estas llaves: origen, destino, vehiculo, carroceria, horas, toneladas, confidence, missing_fields. "
+            "Detecta origen y destino solo si realmente aparecen o se pueden inferir con alta confianza por contexto logistico colombiano. "
+            "Los usuarios pueden escribir configuraciones sin la C, por ejemplo 3S3 o 2S2; devuelvelas con C. "
+            "Si identificas carroceria, devuelve una opcion canonica valida. "
+            "No inventes rutas ni municipios. Usa null cuando falte un dato."
+        ),
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": user_text},
+                    {"type": "input_text", "text": f"CONTEXTO_JSON: {json.dumps(context_payload, ensure_ascii=False)}"},
+                ],
+            }
+        ],
+    }
+
+    try:
+        resp = requests.post(
+            OPENAI_API_URL,
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=20,
+        )
+        if resp.status_code >= 400:
+            logger.error(f"OpenAI route fallback error {resp.status_code}: {resp.text}")
+            return None
+
+        data = resp.json()
+        response_text = extract_response_text(data)
+        if not response_text:
+            return None
+
+        parsed = json.loads(response_text)
+        normalized = normalize_route_extraction(parsed)
+        if normalized:
+            logger.info(
+                "OpenAI fallback parsed: route=%s vehiculo=%s carroceria=%s confidence=%s",
+                bool(normalized.get("route")),
+                normalized.get("vehiculo"),
+                normalized.get("carroceria"),
+                normalized.get("confidence"),
+            )
+        return normalized
+    except Exception as e:
+        logger.error(f"OpenAI route fallback exception: {e}")
         return None
 
 
@@ -2150,6 +2245,7 @@ async def health():
         "openai_enabled": bool(OPENAI_API_KEY and OPENAI_FALLBACK_ENABLED),
         "openai_configured": bool(OPENAI_API_KEY),
         "openai_fallback_enabled": OPENAI_FALLBACK_ENABLED,
+        "openai_model": OPENAI_MODEL if OPENAI_API_KEY else None,
         "gemini_enabled": bool(GEMINI_API_KEY and GEMINI_ENABLED),
         "gemini_configured": bool(GEMINI_API_KEY),
         "gemini_model": GEMINI_MODEL if GEMINI_API_KEY else None,
@@ -2371,6 +2467,7 @@ async def receive_message(request: Request):
         return {"status": "unsupported vacio"}
 
     analisis_busqueda = analizar_texto_busqueda(user_text)
+    openai_extraction = None
     gemini_extraction = None
     ruta, ruta_en_mensaje_actual = resolver_contexto_consulta(analisis_busqueda.get("cleaned_text") or user_text, state)
     vehiculo_consultado = detectar_pregunta_configuracion(user_text)
@@ -2386,6 +2483,38 @@ async def receive_message(request: Request):
             }
         )
         return {"status": "vehicle info sent"}
+
+    if not ruta:
+        openai_extraction = extraer_json_ruta_openai(user_text, analisis_busqueda, state)
+        if openai_extraction:
+            analisis_busqueda["openai_extraction"] = {
+                "route_found": bool(openai_extraction.get("route")),
+                "vehiculo": openai_extraction.get("vehiculo"),
+                "carroceria": openai_extraction.get("carroceria"),
+                "horas": openai_extraction.get("horas"),
+                "toneladas": openai_extraction.get("toneladas"),
+                "confidence": openai_extraction.get("confidence"),
+                "missing_fields": openai_extraction.get("missing_fields"),
+            }
+            if openai_extraction.get("route"):
+                ruta = openai_extraction["route"]
+                ruta_en_mensaje_actual = True
+
+    if not ruta:
+        gemini_extraction = extraer_json_ruta_gemini(user_text, analisis_busqueda, state)
+        if gemini_extraction:
+            analisis_busqueda["gemini_extraction"] = {
+                "route_found": bool(gemini_extraction.get("route")),
+                "vehiculo": gemini_extraction.get("vehiculo"),
+                "carroceria": gemini_extraction.get("carroceria"),
+                "horas": gemini_extraction.get("horas"),
+                "toneladas": gemini_extraction.get("toneladas"),
+                "confidence": gemini_extraction.get("confidence"),
+                "missing_fields": gemini_extraction.get("missing_fields"),
+            }
+            if gemini_extraction.get("route"):
+                ruta = gemini_extraction["route"]
+                ruta_en_mensaje_actual = True
 
     vehiculo_textual = parsear_vehiculo(user_text)
     carroceria_textual = parsear_carroceria(user_text)
@@ -2412,25 +2541,10 @@ async def receive_message(request: Request):
                     "preferred_body_type": carroceria_textual,
                 },
                 "message": user_text,
+                "parse": analisis_busqueda,
             }
         )
         return {"status": "preference captured without route"}
-
-    if not ruta:
-        gemini_extraction = extraer_json_ruta_gemini(user_text, analisis_busqueda, state)
-        if gemini_extraction:
-            analisis_busqueda["gemini_extraction"] = {
-                "route_found": bool(gemini_extraction.get("route")),
-                "vehiculo": gemini_extraction.get("vehiculo"),
-                "carroceria": gemini_extraction.get("carroceria"),
-                "horas": gemini_extraction.get("horas"),
-                "toneladas": gemini_extraction.get("toneladas"),
-                "confidence": gemini_extraction.get("confidence"),
-                "missing_fields": gemini_extraction.get("missing_fields"),
-            }
-            if gemini_extraction.get("route"):
-                ruta = gemini_extraction["route"]
-                ruta_en_mensaje_actual = True
 
     if not ruta:
         fallback_reply = construir_respuesta_ruta_faltante(user_text, analisis_busqueda, state)
@@ -2447,8 +2561,9 @@ async def receive_message(request: Request):
         )
         return {"status": "no route parsed"}
 
-    vehiculo_detectado = parsear_vehiculo(user_text) or (gemini_extraction or {}).get("vehiculo")
-    carroceria_detectada = parsear_carroceria(user_text) or (gemini_extraction or {}).get("carroceria")
+    ai_extraction = openai_extraction or gemini_extraction or {}
+    vehiculo_detectado = parsear_vehiculo(user_text) or ai_extraction.get("vehiculo")
+    carroceria_detectada = parsear_carroceria(user_text) or ai_extraction.get("carroceria")
     if ruta_en_mensaje_actual:
         vehiculo = vehiculo_detectado or get_preferred_vehicle(state)
         carroceria = carroceria_detectada or get_preferred_body_type(state)
@@ -2458,10 +2573,10 @@ async def receive_message(request: Request):
     modo_viaje = parsear_modo_viaje(user_text)
     horas_personalizadas = parsear_horas_personalizadas(user_text)
     if horas_personalizadas is None:
-        horas_personalizadas = (gemini_extraction or {}).get("horas")
+        horas_personalizadas = ai_extraction.get("horas")
     toneladas_explicitas = parsear_toneladas(user_text)
     if toneladas_explicitas is None:
-        toneladas_explicitas = (gemini_extraction or {}).get("toneladas")
+        toneladas_explicitas = ai_extraction.get("toneladas")
     pide_valor_ton = usuario_pide_valor_por_tonelada(user_text)
     pide_horas = usuario_pide_otra_hora(user_text)
     uso_default_vehiculo = vehiculo_detectado is None and (
