@@ -1,5 +1,5 @@
 """
-ATICA WhatsApp Bridge v3.4.2
+ATICA WhatsApp Bridge v3.4.3
 Conecta WhatsApp Cloud API con la API SICETAC y, de forma opcional,
 con modelos externos para extraer mejor la ruta cuando el parser por codigo
 no logra cerrarla.
@@ -19,7 +19,7 @@ import requests
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("atica-whatsapp")
 
-app = FastAPI(title="ATICA WhatsApp Bridge", version="3.4.2")
+app = FastAPI(title="ATICA WhatsApp Bridge", version="3.4.3")
 
 
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "aticatoken123")
@@ -625,6 +625,8 @@ def recortar_destino(destino_raw: str) -> str:
         part = destino_parts[index]
         if part.upper() in palabras_opcion:
             break
+        if re.match(r"^H\d+(?:[.,]\d+)?[.,;:]?$", part, re.IGNORECASE):
+            break
         if part.upper() in VEHICULOS_VALIDOS:
             break
         if re.match(r"^\d+(?:[.,]\d+)?$", part) and index + 1 < len(destino_parts):
@@ -637,6 +639,16 @@ def recortar_destino(destino_raw: str) -> str:
             break
         destino_clean.append(part)
     return " ".join(destino_clean).strip()
+
+
+def limpiar_parametros_consulta_texto(texto: str | None) -> str:
+    cleaned = str(texto or "")
+    cleaned = re.sub(r"\bH\s*\d+(?:[.,]\d+)?\b", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b\d+(?:[.,]\d+)?\s*(?:horas|hora|hrs|hr|h)\b", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b\d+(?:[.,]\d+)?\s*(?:toneladas|tonelada|tons|ton)\b", " ", cleaned, flags=re.IGNORECASE)
+    for vehiculo in sorted(VEHICULOS_VALIDOS, key=len, reverse=True):
+        cleaned = re.sub(rf"\b{re.escape(vehiculo)}\b", " ", cleaned, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", cleaned).strip(" ,.;:-")
 
 
 def normalizar_ciudad(texto: str) -> str:
@@ -789,6 +801,7 @@ def parsear_ruta_por_lineas(texto: str) -> dict | None:
 
 def parsear_ruta(texto: str) -> dict | None:
     texto_base, _ = strip_intent_prefixes(texto)
+    texto_base = limpiar_parametros_consulta_texto(texto_base)
     ruta_por_lineas = parsear_ruta_por_lineas(texto_base)
     if ruta_por_lineas:
         return ruta_por_lineas
@@ -910,14 +923,7 @@ def usuario_pide_valor_por_tonelada(texto: str) -> bool:
 
 
 def usuario_pide_otra_hora(texto: str) -> bool:
-    texto_normalizado = normalizar_lookup_texto(texto)
-    return bool(parsear_horas_personalizadas(texto)) and (
-        "HORA" in texto_normalizado
-        or "CARGUE" in texto_normalizado
-        or "DESCARGUE" in texto_normalizado
-        or "PROCESO" in texto_normalizado
-        or "LOGIST" in texto_normalizado
-    )
+    return parsear_horas_personalizadas(texto) is not None
 
 
 def usuario_pide_vacio(texto: str) -> bool:
@@ -1673,8 +1679,11 @@ def formatear_modo_plus(data: dict) -> str:
         lineas.append(f"No disponibles: {', '.join(str(f.get('vehiculo')) for f in fallidas)}")
 
     lineas.append("")
-    lineas.append("Modo plus usa 4 horas logisticas.")
-    lineas.append("Para otra hora, escribe la ruta y H6, H8 o el numero de horas que quieras.")
+    if horas == 4:
+        lineas.append("Modo plus usa 4 horas logisticas si no indicas otra hora.")
+    else:
+        lineas.append(f"Modo plus calculado con {horas_label} horas logisticas.")
+    lineas.append("Para otra hora, escribe la ruta y H6, H8 o 8 horas.")
     return "\n".join(lineas)
 
 
@@ -2781,6 +2790,8 @@ async def receive_message(request: Request):
         vehiculo = vehiculo_detectado or (state.get("last_route") or {}).get("vehiculo") or get_preferred_vehicle(state)
         carroceria = carroceria_detectada or (state.get("last_route") or {}).get("carroceria") or get_preferred_body_type(state)
     modo_viaje = parsear_modo_viaje(user_text)
+    if modo_viaje is None and not ruta_en_mensaje_actual:
+        modo_viaje = (state.get("last_route") or {}).get("modo_viaje")
     horas_personalizadas = parsear_horas_personalizadas(user_text)
     if horas_personalizadas is None:
         horas_personalizadas = ai_extraction.get("horas")
@@ -2801,12 +2812,19 @@ async def receive_message(request: Request):
     if carroceria_detectada:
         set_preferred_body_type(state, carroceria_detectada)
 
-    if usuario_pide_modo_plus(user_text):
+    pide_modo_plus = usuario_pide_modo_plus(user_text) or (
+        not ruta_en_mensaje_actual
+        and horas_personalizadas is not None
+        and (state.get("last_route") or {}).get("vehiculo") == "PLUS"
+    )
+
+    if pide_modo_plus:
+        horas_plus = horas_personalizadas if horas_personalizadas is not None else 4.0
         resultado_plus = consultar_modo_plus(
             ruta=ruta,
             carroceria=carroceria,
             modo_viaje=modo_viaje,
-            horas=4.0,
+            horas=horas_plus,
         )
         state["last_route"] = {
             "origen": ruta["origen"],
@@ -2828,8 +2846,8 @@ async def receive_message(request: Request):
                 "message": user_text,
                 "parse": analisis_busqueda,
                 "query": {
-                    "kind": "plus_h4_all_configurations",
-                    "requested_hours": 4.0,
+                    "kind": f"plus_h{fmt_decimal(horas_plus) or horas_plus}_all_configurations",
+                    "requested_hours": horas_plus,
                     "vehicle_count": len(resultado_plus.get("filas") or []),
                 },
             }
