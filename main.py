@@ -73,8 +73,13 @@ DEFAULT_CARROCERIA = "General - Estacas"
 MANUAL_MUNICIPIO_ALIASES = {
     "BOGOTA": {"nombre_oficial": "BOGOTÁ, D.C.", "codigo_dane": "11001000", "departamento": "BOGOTÁ, D.C."},
     "BOGOTA DC": {"nombre_oficial": "BOGOTÁ, D.C.", "codigo_dane": "11001000", "departamento": "BOGOTÁ, D.C."},
+    "BOG": {"nombre_oficial": "BOGOTÁ, D.C.", "codigo_dane": "11001000", "departamento": "BOGOTÁ, D.C."},
+    "CAPITAL": {"nombre_oficial": "BOGOTÁ, D.C.", "codigo_dane": "11001000", "departamento": "BOGOTÁ, D.C."},
+    "LA CAPITAL": {"nombre_oficial": "BOGOTÁ, D.C.", "codigo_dane": "11001000", "departamento": "BOGOTÁ, D.C."},
+    "CAPITAL DEL PAIS": {"nombre_oficial": "BOGOTÁ, D.C.", "codigo_dane": "11001000", "departamento": "BOGOTÁ, D.C."},
     "CALI": {"nombre_oficial": "SANTIAGO DE CALI", "codigo_dane": "76001000", "departamento": "VALLE DEL CAUCA"},
     "MEDELLIN": {"nombre_oficial": "MEDELLÍN", "codigo_dane": "05001000", "departamento": "ANTIOQUIA"},
+    "MEDALLO": {"nombre_oficial": "MEDELLÍN", "codigo_dane": "05001000", "departamento": "ANTIOQUIA"},
     "BARRANQUILLA": {"nombre_oficial": "BARRANQUILLA", "codigo_dane": "08001000", "departamento": "ATLÁNTICO"},
     "CARTAGENA": {"nombre_oficial": "CARTAGENA DE INDIAS", "codigo_dane": "13001000", "departamento": "BOLÍVAR"},
     "BUCARAMANGA": {"nombre_oficial": "BUCARAMANGA", "codigo_dane": "68001000", "departamento": "SANTANDER"},
@@ -511,10 +516,34 @@ def get_vehicle_detail(vehiculo: str) -> dict | None:
 def resolver_municipio_cache(texto: str | None) -> dict | None:
     ensure_municipios_cache()
     aliases = MUNICIPIOS_CACHE.get("aliases") or {}
-    clave = normalizar_texto_libre(texto)
+    clave = normalizar_texto_libre(limpiar_referencia_municipio(texto))
     if not clave:
         return None
     return aliases.get(clave)
+
+
+def limpiar_referencia_municipio(texto: str | None) -> str:
+    valor = str(texto or "").strip()
+    if not valor:
+        return ""
+
+    normalizado = normalizar_texto_libre(valor)
+    replacements = {
+        "LA CAPITAL DEL PAIS": "CAPITAL DEL PAIS",
+        "CAPITAL COLOMBIANA": "CAPITAL",
+        "CAPITAL DE COLOMBIA": "CAPITAL",
+    }
+    if normalizado in replacements:
+        return replacements[normalizado]
+
+    cleaned = valor
+    for pattern in [
+        r"^(?:la|el)\s+",
+        r"^(?:ciudad|municipio|capital|sucursal|planta|bodega|terminal)\s+de\s+",
+        r"^(?:ciudad|municipio|sucursal|planta|bodega|terminal)\s+",
+    ]:
+        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE).strip()
+    return cleaned or valor
 
 
 def extraer_municipios_en_texto(texto: str) -> list[dict]:
