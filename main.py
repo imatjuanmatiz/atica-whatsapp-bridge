@@ -1,5 +1,5 @@
 """
-ATICA WhatsApp Bridge v3.5.1
+ATICA WhatsApp Bridge v3.5.2
 Conecta WhatsApp Cloud API con la API SICETAC y, de forma opcional,
 con modelos externos para extraer mejor la ruta cuando el parser por codigo
 no logra cerrarla.
@@ -19,7 +19,7 @@ import requests
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("atica-whatsapp")
 
-app = FastAPI(title="ATICA WhatsApp Bridge", version="3.5.1")
+app = FastAPI(title="ATICA WhatsApp Bridge", version="3.5.2")
 
 
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "aticatoken123")
@@ -1593,6 +1593,29 @@ def consultar_sicetac(
                 detail = err_data.get("detail", str(err_data))
             except Exception:
                 detail = resp.text
+            if incluir_peajes and "nan" in str(detail).lower():
+                logger.warning("SICETAC peajes response contained NaN; retrying without inline peajes")
+                retry_payload = dict(payload)
+                retry_payload.pop("peajes", None)
+                retry_resp = requests.post(
+                    url,
+                    json=retry_payload,
+                    headers={"Content-Type": "application/json"},
+                    timeout=REQUEST_TIMEOUT,
+                )
+                logger.info(f"SICETAC retry without peajes: status={retry_resp.status_code}")
+                if retry_resp.status_code < 400:
+                    data = retry_resp.json()
+                    if isinstance(data, dict) and data.get("variantes"):
+                        data["variantes"] = ordenar_variantes_sicetac(data.get("variantes") or [])
+                    id_sice = extraer_id_sice_principal(data)
+                    if id_sice:
+                        detalle_peajes = consultar_peajes_detalle(id_sice, configuracion_peajes_para_vehiculo(vehiculo))
+                        peajes_resumen = extraer_resumen_peajes(detalle_peajes, vehiculo)
+                        if peajes_resumen:
+                            data["peajes_detalle"] = detalle_peajes
+                            data["peajes_resumen"] = peajes_resumen
+                    return data
             logger.error(f"SICETAC error {resp.status_code}: {detail}")
             return {"_error": True, "_status": resp.status_code, "_detail": detail}
 
