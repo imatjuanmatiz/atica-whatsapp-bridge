@@ -67,6 +67,7 @@ VEHICULOS_VALIDOS = [
     "C3S3",
     "V3",
 ]
+PLUS_EXCLUDED_VEHICLES = {"V3"}
 DEFAULT_VEHICULO = "C3S3"
 DEFAULT_CARROCERIA = "General - Estacas"
 PEAJE_CONFIG_POR_VEHICULO = {
@@ -1667,8 +1668,8 @@ def get_plus_vehicles() -> list[str]:
     ensure_vehiculos_cache()
     details = VEHICULOS_CACHE.get("details") or {}
     if details:
-        return [vehiculo for vehiculo in VEHICULOS_VALIDOS if vehiculo in details]
-    return VEHICULOS_VALIDOS[:]
+        return [vehiculo for vehiculo in VEHICULOS_VALIDOS if vehiculo in details and vehiculo not in PLUS_EXCLUDED_VEHICLES]
+    return [vehiculo for vehiculo in VEHICULOS_VALIDOS if vehiculo not in PLUS_EXCLUDED_VEHICLES]
 
 
 def seleccionar_variante_principal(data: dict | None) -> dict | None:
