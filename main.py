@@ -1,5 +1,5 @@
 """
-ATICA WhatsApp Bridge v3.4.3
+ATICA WhatsApp Bridge v3.5.0
 Conecta WhatsApp Cloud API con la API SICETAC y, de forma opcional,
 con modelos externos para extraer mejor la ruta cuando el parser por codigo
 no logra cerrarla.
@@ -19,7 +19,7 @@ import requests
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("atica-whatsapp")
 
-app = FastAPI(title="ATICA WhatsApp Bridge", version="3.4.3")
+app = FastAPI(title="ATICA WhatsApp Bridge", version="3.5.0")
 
 
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "aticatoken123")
@@ -69,6 +69,17 @@ VEHICULOS_VALIDOS = [
 ]
 DEFAULT_VEHICULO = "C3S3"
 DEFAULT_CARROCERIA = "General - Estacas"
+PEAJE_CONFIG_POR_VEHICULO = {
+    "C278": "2",
+    "C289": "2",
+    "C2910": "2",
+    "C2M10": "2",
+    "C3": "3",
+    "C2S2": "C2S2",
+    "C2S3": "C2S3",
+    "C3S2": "C3S2",
+    "C3S3": "C3S3",
+}
 
 MANUAL_MUNICIPIO_ALIASES = {
     "BOGOTA": {"nombre_oficial": "BOGOTÁ, D.C.", "codigo_dane": "11001000", "departamento": "BOGOTÁ, D.C."},
@@ -1246,6 +1257,13 @@ def formatear_respuesta(data: dict, *, include_closing: bool = True) -> str:
                     lineas.append(f"H4: {fmt_cop(tot.get('H4'))}")
                 if tot.get("H8") is not None:
                     lineas.append(f"H8: {fmt_cop(tot.get('H8'))}")
+                peajes_resumen = var.get("peajes_resumen") or {}
+                if peajes_resumen.get("total_peajes") is not None:
+                    cantidad = peajes_resumen.get("cantidad_peajes")
+                    detalle = f"Peajes: {fmt_cop(peajes_resumen.get('total_peajes'))}"
+                    if cantidad:
+                        detalle += f" ({cantidad} peajes)"
+                    lineas.append(detalle)
         else:
             totales = data.get("totales", {})
             lineas.append("Valores SICETAC:")
@@ -1255,9 +1273,18 @@ def formatear_respuesta(data: dict, *, include_closing: bool = True) -> str:
                 lineas.append(f"H4: {fmt_cop(totales.get('H4'))}")
             if totales.get("H8") is not None:
                 lineas.append(f"H8: {fmt_cop(totales.get('H8'))}")
+            peajes_resumen = data.get("peajes_resumen") or {}
+            if peajes_resumen.get("total_peajes") is not None:
+                cantidad = peajes_resumen.get("cantidad_peajes")
+                detalle = f"Peajes: {fmt_cop(peajes_resumen.get('total_peajes'))}"
+                if cantidad:
+                    detalle += f" ({cantidad} peajes)"
+                lineas.append(detalle)
 
         if include_closing:
             lineas.append("")
+            if data.get("peajes_resumen") or any((v.get("peajes_resumen") for v in data.get("variantes", []) if isinstance(v, dict))):
+                lineas.append("Si quieres el detalle de peajes, escribe: detalle peajes.")
             lineas.append("Escribe otra ruta asi: origen a destino.")
             lineas.append("Si quieres ver mas opciones, escribe: opciones.")
             lineas.append("Si quieres cambiar configuracion, escribe: cambiar configuracion.")
@@ -1346,6 +1373,15 @@ def usuario_quiere_cambiar_configuracion(texto: str) -> bool:
         or "CAMBIAR CARROCERIA" in texto_normalizado
         or "CAMBIAR CARROCERIA" in texto_normalizado
         or texto_normalizado.strip() in {"CONFIGURACION", "CONFIGURACIÓN", "CARROCERIA", "CARROCERÍA"}
+    )
+
+
+def usuario_pide_detalle_peajes(texto: str) -> bool:
+    texto_normalizado = normalizar_lookup_texto(texto)
+    return bool(
+        re.search(r"\bDETALLE(?:S)?\s+(?:DE\s+)?PEAJE(?:S)?\b", texto_normalizado)
+        or re.search(r"\bPEAJE(?:S)?\s+(?:DETALLE|DETALLADO|DE\s+LA\s+RUTA)\b", texto_normalizado)
+        or texto_normalizado.strip() in {"VER PEAJES", "PEAJES DE ESA RUTA", "PEAJES DE LA RUTA"}
     )
 
 
@@ -1457,6 +1493,7 @@ def get_state(phone: str) -> dict:
             },
             "last_route": None,
             "last_result": None,
+            "last_plus_result": None,
             "preferred_vehicle": None,
             "preferred_body_type": None,
             "pending_selection": None,
@@ -1512,6 +1549,7 @@ def consultar_sicetac(
     tarifa_standby: float | None = None,
     codigo_dane_origen: str | None = None,
     codigo_dane_destino: str | None = None,
+    incluir_peajes: bool = False,
 ) -> dict | None:
     payload = {
         "origen": origen,
@@ -1533,6 +1571,8 @@ def consultar_sicetac(
         payload["horas_logisticas_personalizadas"] = horas_logisticas
     if tarifa_standby is not None:
         payload["tarifa_standby"] = tarifa_standby
+    if incluir_peajes:
+        payload["peajes"] = True
 
     url = f"{SICETAC_API_BASE}/consulta"
     logger.info(f"SICETAC [{url}] payload: {payload}")
@@ -1558,6 +1598,14 @@ def consultar_sicetac(
         data = resp.json()
         if isinstance(data, dict) and data.get("variantes"):
             data["variantes"] = ordenar_variantes_sicetac(data.get("variantes") or [])
+        if incluir_peajes and isinstance(data, dict) and not data.get("peajes_resumen"):
+            id_sice = extraer_id_sice_principal(data)
+            if id_sice:
+                detalle_peajes = consultar_peajes_detalle(id_sice, configuracion_peajes_para_vehiculo(vehiculo))
+                peajes_resumen = extraer_resumen_peajes(detalle_peajes, vehiculo)
+                if peajes_resumen:
+                    data["peajes_detalle"] = detalle_peajes
+                    data["peajes_resumen"] = peajes_resumen
         return data
     except requests.exceptions.Timeout:
         logger.error("SICETAC timeout")
@@ -1565,6 +1613,54 @@ def consultar_sicetac(
     except Exception as e:
         logger.error(f"SICETAC exception: {e}")
         return None
+
+
+def consultar_peajes_detalle(id_sice: str | int | None, configuracion: str | None = None) -> dict | None:
+    if id_sice is None:
+        return None
+    url = f"{SICETAC_API_BASE}/peajes/detalle"
+    params = {"id_sice": str(id_sice)}
+    if configuracion:
+        params["configuracion"] = configuracion
+
+    try:
+        resp = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+        if resp.status_code >= 400:
+            logger.error(f"Peajes detalle error {resp.status_code}: {resp.text[:500]}")
+            return {"_error": True, "_status": resp.status_code, "_detail": resp.text}
+        return resp.json()
+    except requests.exceptions.Timeout:
+        logger.error("Peajes detalle timeout")
+        return None
+    except Exception as e:
+        logger.error(f"Peajes detalle exception: {e}")
+        return None
+
+
+def configuracion_peajes_para_vehiculo(vehiculo: str | None) -> str | None:
+    vehiculo_norm = (vehiculo or "").strip().upper().replace(" ", "")
+    if not vehiculo_norm:
+        return None
+    if vehiculo_norm in PEAJE_CONFIG_POR_VEHICULO:
+        return PEAJE_CONFIG_POR_VEHICULO[vehiculo_norm]
+    if vehiculo_norm in {"2", "3", "C2S2", "C2S3", "C3S2", "C3S3"}:
+        return vehiculo_norm
+    if vehiculo_norm in {"2S2", "2S3", "3S2", "3S3"}:
+        return f"C{vehiculo_norm}"
+    return vehiculo_norm
+
+
+def extraer_resumen_peajes(detalle: dict | None, configuracion: str | None) -> dict:
+    if not isinstance(detalle, dict):
+        return {}
+    resumen = detalle.get("resumen") or {}
+    config = configuracion_peajes_para_vehiculo(configuracion)
+    if config and isinstance(resumen, dict) and isinstance(resumen.get(config), dict):
+        return resumen.get(config) or {}
+    if isinstance(resumen, dict) and len(resumen) == 1:
+        first = next(iter(resumen.values()))
+        return first if isinstance(first, dict) else {}
+    return {}
 
 
 def get_plus_vehicles() -> list[str]:
@@ -1590,7 +1686,101 @@ def extraer_id_sice_principal(data: dict | None) -> str | None:
         return str(variante.get("ID_SICE"))
     if data and data.get("ID_SICE") is not None:
         return str(data.get("ID_SICE"))
+    detalle_lookup = data.get("detalle_lookup") if isinstance(data, dict) else None
+    if isinstance(detalle_lookup, dict) and detalle_lookup.get("rutasid") is not None:
+        return str(detalle_lookup.get("rutasid"))
+    peajes_detalle = data.get("peajes_detalle") if isinstance(data, dict) else None
+    if isinstance(peajes_detalle, dict) and peajes_detalle.get("id_sice") is not None:
+        return str(peajes_detalle.get("id_sice"))
     return None
+
+
+def _primer_valor_dict(values: dict | None):
+    if not isinstance(values, dict):
+        return None
+    for value in values.values():
+        return value
+    return None
+
+
+def formatear_detalle_peajes(detalle: dict, *, origen: str | None = None, destino: str | None = None, configuracion: str | None = None) -> str:
+    if not detalle or detalle.get("_error"):
+        return "No pude traer el detalle de peajes para esa ruta en este momento."
+
+    config_norm = (configuracion or detalle.get("configuracion") or "").strip().upper()
+    resumen = detalle.get("resumen") or {}
+    resumen_config = resumen.get(config_norm) if config_norm else None
+    if not resumen_config and isinstance(resumen, dict) and len(resumen) == 1:
+        resumen_config = next(iter(resumen.values()))
+
+    nombre_ruta = quitar_tildes(detalle.get("nombre_ruta") or "")
+    encabezado_ruta = f"{quitar_tildes(origen)} a {quitar_tildes(destino)}" if origen and destino else nombre_ruta
+    lineas = [f"Detalle peajes {encabezado_ruta}".strip()]
+    if config_norm:
+        lineas[0] += f" {config_norm}"
+    if resumen_config:
+        cantidad = resumen_config.get("cantidad_peajes")
+        total = resumen_config.get("total_peajes")
+        lineas.append(f"Total peajes: {fmt_cop(total)}" + (f" | {cantidad} peajes" if cantidad else ""))
+    elif isinstance(resumen, dict) and resumen:
+        partes = []
+        for cfg, item in resumen.items():
+            if isinstance(item, dict):
+                partes.append(f"{cfg}: {fmt_cop(item.get('total_peajes'))}")
+        if partes:
+            lineas.append("Totales por configuracion: " + " | ".join(partes))
+    lineas.append("")
+
+    filas = detalle.get("detalle") or []
+    for peaje in filas[:20]:
+        nombre = quitar_tildes(peaje.get("nombre_peaje") or f"Peaje {peaje.get('id_peaje')}")
+        valores = peaje.get("valores") or {}
+        if config_norm:
+            valor = valores.get(config_norm) if isinstance(valores, dict) else None
+            if valor is None:
+                valor = _primer_valor_dict(valores)
+            lineas.append(f"{peaje.get('orden')}. {nombre}: {fmt_cop(valor)}")
+        else:
+            partes = [f"{cfg} {fmt_cop(valor)}" for cfg, valor in valores.items()]
+            lineas.append(f"{peaje.get('orden')}. {nombre}: " + " | ".join(partes))
+    if len(filas) > 20:
+        lineas.append(f"Hay {len(filas) - 20} peajes adicionales.")
+    return "\n".join(lineas)
+
+
+def responder_detalle_peajes_desde_contexto(user_text: str, state: dict) -> str:
+    vehiculo_solicitado = parsear_vehiculo(user_text)
+    last_route = state.get("last_route") or {}
+    last_result = state.get("last_result") or {}
+    last_plus = state.get("last_plus_result") or {}
+
+    es_plus = last_route.get("vehiculo") == "PLUS" or bool(last_plus)
+    configuracion = vehiculo_solicitado
+    if not configuracion and not es_plus:
+        configuracion = last_route.get("vehiculo")
+    configuracion_peajes = configuracion_peajes_para_vehiculo(configuracion) if configuracion else None
+
+    id_sice = None
+    if es_plus:
+        id_sice = last_plus.get("route_id") or last_route.get("route_id")
+    if not id_sice:
+        id_sice = extraer_id_sice_principal(last_result)
+    if not id_sice and last_route.get("route_id"):
+        id_sice = last_route.get("route_id")
+
+    if not id_sice:
+        return "Claro. Primero escribeme la ruta, por ejemplo: Bogota a Barranquilla C3S3."
+
+    detalle = consultar_peajes_detalle(id_sice, configuracion_peajes)
+    if detalle is None or detalle.get("_error"):
+        return "No pude traer el detalle de peajes para esa ruta en este momento."
+
+    return formatear_detalle_peajes(
+        detalle,
+        origen=last_route.get("origen"),
+        destino=last_route.get("destino"),
+        configuracion=configuracion_peajes,
+    )
 
 
 def consultar_modo_plus(
@@ -1613,6 +1803,7 @@ def consultar_modo_plus(
             modo_viaje=modo_viaje,
             codigo_dane_origen=ruta.get("codigo_dane_origen"),
             codigo_dane_destino=ruta.get("codigo_dane_destino"),
+            incluir_peajes=True,
         )
 
         if resultado is None:
@@ -1627,6 +1818,10 @@ def consultar_modo_plus(
 
         valor = calcular_total_para_horas(resultado, horas)
         id_sice = extraer_id_sice_principal(resultado)
+        peajes_resumen = resultado.get("peajes_resumen") or {}
+        if not peajes_resumen and id_sice:
+            detalle_peajes = consultar_peajes_detalle(id_sice, configuracion_peajes_para_vehiculo(vehiculo))
+            peajes_resumen = extraer_resumen_peajes(detalle_peajes, vehiculo)
         if route_id is None and id_sice:
             route_id = id_sice
         if mes is None and resultado.get("mes"):
@@ -1635,6 +1830,8 @@ def consultar_modo_plus(
             "vehiculo": vehiculo,
             "valor": valor,
             "id_sice": id_sice,
+            "peajes_total": peajes_resumen.get("total_peajes"),
+            "peajes_cantidad": peajes_resumen.get("cantidad_peajes"),
         })
 
     return {
@@ -1671,7 +1868,10 @@ def formatear_modo_plus(data: dict) -> str:
     fallidas = [fila for fila in filas if fila.get("valor") is None]
 
     for fila in exitosas:
-        lineas.append(f"{fila.get('vehiculo')}: {fmt_cop(fila.get('valor'))}")
+        linea = f"{fila.get('vehiculo')}: {fmt_cop(fila.get('valor'))}"
+        if fila.get("peajes_total") is not None:
+            linea += f" | Peajes {fmt_cop(fila.get('peajes_total'))}"
+        lineas.append(linea)
 
     if fallidas and not exitosas:
         lineas.append("No pude calcular las configuraciones para esta ruta.")
@@ -1684,6 +1884,7 @@ def formatear_modo_plus(data: dict) -> str:
     else:
         lineas.append(f"Modo plus calculado con {horas_label} horas logisticas.")
     lineas.append("Para otra hora, escribe la ruta y H6, H8 o 8 horas.")
+    lineas.append("Para ver peaje a peaje, escribe: detalle peajes C3S3.")
     return "\n".join(lineas)
 
 
@@ -1699,6 +1900,8 @@ def build_plus_snapshot(data: dict) -> dict:
             {
                 "vehiculo": fila.get("vehiculo"),
                 "valor": fila.get("valor"),
+                "peajes_total": fila.get("peajes_total"),
+                "peajes_cantidad": fila.get("peajes_cantidad"),
                 "id_sice": fila.get("id_sice"),
                 "error": fila.get("error"),
             }
@@ -2607,6 +2810,21 @@ async def receive_message(request: Request):
         )
         return {"status": "options sent"}
 
+    if usuario_pide_detalle_peajes(user_text):
+        respuesta_peajes = responder_detalle_peajes_desde_contexto(user_text, state)
+        send_whatsapp_message(to=from_number, body=respuesta_peajes)
+        capture_lead_event(
+            {
+                "event": "toll_detail_requested",
+                "ts": utcnow_iso(),
+                "channel": "whatsapp",
+                "lead": state["lead"],
+                "route": state.get("last_route"),
+                "message": user_text,
+            }
+        )
+        return {"status": "toll detail sent"}
+
     if usuario_quiere_menu_vehiculo(user_text) and not parsear_ruta(user_text):
         vehiculo_preferido, _ = aplicar_preferencia_textual(user_text, state)
         if vehiculo_preferido and not state.get("last_route"):
@@ -2832,8 +3050,11 @@ async def receive_message(request: Request):
             "vehiculo": "PLUS",
             "carroceria": carroceria,
             "modo_viaje": modo_viaje,
+            "route_id": resultado_plus.get("route_id"),
             "consulted_at": utcnow_iso(),
         }
+        state["last_plus_result"] = resultado_plus
+        state["last_result"] = None
         send_whatsapp_message(to=from_number, body=formatear_modo_plus(resultado_plus))
         capture_lead_event(
             {
@@ -2862,6 +3083,7 @@ async def receive_message(request: Request):
         modo_viaje=modo_viaje,
         codigo_dane_origen=ruta.get("codigo_dane_origen"),
         codigo_dane_destino=ruta.get("codigo_dane_destino"),
+        incluir_peajes=True,
     )
 
     if resultado is None:
@@ -2896,9 +3118,11 @@ async def receive_message(request: Request):
         "vehiculo": vehiculo or "C3S3",
         "carroceria": carroceria,
         "modo_viaje": modo_viaje,
+        "route_id": extraer_id_sice_principal(resultado),
         "consulted_at": utcnow_iso(),
     }
     state["last_result"] = resultado
+    state["last_plus_result"] = None
 
     respuesta_deterministica = formatear_respuesta(resultado)
     respuesta = respuesta_deterministica
