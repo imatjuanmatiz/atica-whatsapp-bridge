@@ -899,6 +899,11 @@ def parsear_carroceria(texto: str) -> str | None:
 
 
 def parsear_modo_viaje(texto: str) -> str | None:
+    texto_normalizado = normalizar_lookup_texto(texto)
+    if re.search(r"\bVACIO\b", texto_normalizado):
+        return "VACIO"
+    if re.search(r"\bCARGADO\b", texto_normalizado):
+        return "CARGADO"
     return None
 
 
@@ -1224,6 +1229,7 @@ def formatear_respuesta(data: dict, *, include_closing: bool = True) -> str:
         destino = quitar_tildes(data.get("destino", "?"))
         config = data.get("configuracion", "C3S3")
         carroceria = quitar_tildes(data.get("carroceria", DEFAULT_CARROCERIA))
+        modo_viaje = (data.get("modo_viaje") or "CARGADO").strip().upper()
         mes = data.get("mes", "")
         descripcion_vehiculo = descripcion_corta_vehiculo(config)
 
@@ -1235,6 +1241,7 @@ def formatear_respuesta(data: dict, *, include_closing: bool = True) -> str:
         lineas = [
             f"Ruta: {origen} a {destino}",
             configuracion_linea,
+            f"Modo: {'Vacio' if modo_viaje == 'VACIO' else 'Cargado'}",
             "Referencia SICETAC presentada con H2, H4 y H8: 2, 4 y 8 horas logisticas.",
         ]
         if mes:
@@ -1331,6 +1338,7 @@ def mensaje_ayuda() -> str:
         "- Cali a Buenaventura portacontenedores\n"
         "- Bogota a Barranquilla C3S3 furgon refrigerado\n"
         "- Cartagena a Bogota C2S2 estacas\n"
+        "- Cartagena a Bogota C3S3 vacio\n"
         "- Para cambiar una ruta ya calculada: escribe cambiar configuracion y elige C2S2\n\n"
         "Escribe la ruta que quieres que analicemos hoy."
     )
@@ -1360,6 +1368,7 @@ def mensaje_opciones() -> str:
         "- Cali a Buenaventura portacontenedores\n"
         "- Bogota a Barranquilla C3S3 furgon refrigerado\n"
         "- Cartagena a Bogota C2S2 estacas\n"
+        "- Cartagena a Bogota C3S3 vacio\n"
         "- Si ya calculaste una ruta y quieres cambiar vehiculo o carroceria, escribe: cambiar configuracion\n\n"
         "Tambien puedes escribir ayuda o cambiar configuracion."
     )
@@ -1520,6 +1529,12 @@ def set_preferred_body_type(state: dict, carroceria: str | None):
         state["preferred_body_type"] = carroceria.strip()
 
 
+def carroceria_para_modo_viaje(carroceria: str | None, modo_viaje: str | None) -> str | None:
+    if (modo_viaje or "").strip().upper() == "VACIO":
+        return "GENERAL"
+    return carroceria
+
+
 def merge_lead_data(state: dict, profile_name: str | None, text: str):
     lead = state["lead"]
     if profile_name and not lead.get("profile_name"):
@@ -1560,7 +1575,7 @@ def consultar_sicetac(
     if vehiculo:
         payload["vehiculo"] = vehiculo
     if carroceria:
-        payload["carroceria"] = carroceria
+        payload["carroceria"] = carroceria_para_modo_viaje(carroceria, modo_viaje)
     if modo_viaje:
         payload["modo_viaje"] = modo_viaje
     if codigo_dane_origen:
@@ -1861,7 +1876,8 @@ def consultar_modo_plus(
     return {
         "origen": ruta["origen"],
         "destino": ruta["destino"],
-        "carroceria": carroceria or DEFAULT_CARROCERIA,
+        "carroceria": carroceria_para_modo_viaje(carroceria or DEFAULT_CARROCERIA, modo_viaje),
+        "modo_viaje": (modo_viaje or "CARGADO").upper(),
         "horas": float(horas),
         "route_id": route_id,
         "mes": mes,
@@ -1875,6 +1891,7 @@ def formatear_modo_plus(data: dict) -> str:
     origen = quitar_tildes(data.get("origen") or "?")
     destino = quitar_tildes(data.get("destino") or "?")
     carroceria = quitar_tildes(data.get("carroceria") or DEFAULT_CARROCERIA)
+    modo_viaje = (data.get("modo_viaje") or "CARGADO").strip().upper()
 
     lineas = [
         f"PLUS SICETAC H{horas_label}",
@@ -1885,6 +1902,7 @@ def formatear_modo_plus(data: dict) -> str:
     if data.get("mes"):
         lineas.append(f"Periodo: {data.get('mes')}")
     lineas.append(f"Carroceria: {carroceria}")
+    lineas.append(f"Modo: {'Vacio' if modo_viaje == 'VACIO' else 'Cargado'}")
     lineas.append("")
 
     filas = data.get("filas") or []
@@ -2910,23 +2928,6 @@ async def receive_message(request: Request):
         )
         return {"status": "body selector sent from text"}
 
-    if usuario_pide_vacio(user_text):
-        msg = (
-            "Por ahora este canal solo entrega valores cargados.\n\n"
-            "Escribe la ruta asi: Bogota a Barranquilla C3S3."
-        )
-        send_whatsapp_message(to=from_number, body=msg)
-        capture_lead_event(
-            {
-                "event": "unsupported_vacio_request",
-                "ts": utcnow_iso(),
-                "channel": "whatsapp",
-                "lead": state["lead"],
-                "message": user_text,
-            }
-        )
-        return {"status": "unsupported vacio"}
-
     analisis_busqueda = analizar_texto_busqueda(user_text)
     openai_extraction = None
     gemini_extraction = None
@@ -3072,7 +3073,7 @@ async def receive_message(request: Request):
             "origen": ruta["origen"],
             "destino": ruta["destino"],
             "vehiculo": "PLUS",
-            "carroceria": carroceria,
+            "carroceria": carroceria_para_modo_viaje(carroceria, modo_viaje),
             "modo_viaje": modo_viaje,
             "route_id": resultado_plus.get("route_id"),
             "consulted_at": utcnow_iso(),
@@ -3140,7 +3141,7 @@ async def receive_message(request: Request):
         "origen": ruta["origen"],
         "destino": ruta["destino"],
         "vehiculo": vehiculo or "C3S3",
-        "carroceria": carroceria,
+        "carroceria": resultado.get("carroceria") or carroceria_para_modo_viaje(carroceria, modo_viaje),
         "modo_viaje": modo_viaje,
         "route_id": extraer_id_sice_principal(resultado),
         "consulted_at": utcnow_iso(),
