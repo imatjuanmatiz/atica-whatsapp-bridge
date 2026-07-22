@@ -1,5 +1,5 @@
 """
-ATICA WhatsApp Bridge v3.5.2
+ATICA WhatsApp Bridge v3.5.3
 Conecta WhatsApp Cloud API con la API SICETAC y, de forma opcional,
 con modelos externos para extraer mejor la ruta cuando el parser por codigo
 no logra cerrarla.
@@ -19,7 +19,7 @@ import requests
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("atica-whatsapp")
 
-app = FastAPI(title="ATICA WhatsApp Bridge", version="3.5.2")
+app = FastAPI(title="ATICA WhatsApp Bridge", version="3.5.3")
 
 
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "aticatoken123")
@@ -59,27 +59,61 @@ VEHICULOS_VALIDOS = [
     "C278",
     "C289",
     "C2910",
+    "C258",
+    "C28105",
+    "CA",
     "C2M10",
     "C3",
     "C2S2",
     "C2S3",
     "C3S2",
     "C3S3",
+    "V2",
     "V3",
+    "V4",
 ]
-PLUS_EXCLUDED_VEHICLES = {"V3"}
+VEHICLE_GROUPS = {
+    "livianos": {
+        "title": "Livianos",
+        "vehicles": ["C278", "C289", "C2910", "C258", "C28105", "CA"],
+    },
+    "carga": {
+        "title": "Carga pesada",
+        "vehicles": ["C2M10", "C3", "C2S2", "C2S3", "C3S2", "C3S3"],
+    },
+    "volquetas": {
+        "title": "Volquetas",
+        "vehicles": ["V2", "V3", "V4"],
+    },
+}
+VOLQUETA_VEHICLES = {"V2", "V3", "V4"}
+VOLQUETA_BODY_TYPE = "Granel Solido - Volco"
+PLUS_EXCLUDED_VEHICLES = VOLQUETA_VEHICLES
+VEHICULO_ALIASES_FALLBACK = {
+    "2_5_8": "C258",
+    "2_8_105": "C28105",
+    "CA_35_5": "CA",
+    "2S2": "C2S2",
+    "2S3": "C2S3",
+    "3S2": "C3S2",
+    "3S3": "C3S3",
+}
 DEFAULT_VEHICULO = "C3S3"
 DEFAULT_CARROCERIA = "General - Estacas"
 PEAJE_CONFIG_POR_VEHICULO = {
     "C278": "2",
     "C289": "2",
     "C2910": "2",
+    "C258": "2",
+    "C28105": "2",
+    "CA": "2",
     "C2M10": "2",
     "C3": "3",
     "C2S2": "C2S2",
     "C2S3": "C2S3",
     "C3S2": "C3S2",
     "C3S3": "C3S3",
+    "V2": "2",
 }
 
 MANUAL_MUNICIPIO_ALIASES = {
@@ -216,13 +250,18 @@ VEHICULO_DESCRIPCIONES = {
     "C278": "camion rigido de 2 ejes",
     "C289": "camion rigido de 2 ejes de mayor capacidad",
     "C2910": "camion rigido de 2 ejes de mayor tonelaje",
+    "C258": "camion de 2 ejes liviano PBV 5.000 a 8.000 kg",
+    "C28105": "camion de 2 ejes liviano PBV 8.000 a 10.500 kg",
+    "CA": "camioneta PBV 3.500 a 5.000 kg",
     "C2M10": "configuracion para mula de 2 ejes motrices",
     "C3": "camion rigido de 3 ejes",
     "C2S2": "tractocamion de 2 ejes con semirremolque de 2 ejes",
     "C2S3": "tractocamion de 2 ejes con semirremolque de 3 ejes",
     "C3S2": "tractocamion de 3 ejes con semirremolque de 2 ejes",
     "C3S3": "tractocamion de 3 ejes con semirremolque de 3 ejes",
-    "V3": "vehiculo liviano o configuracion especial segun la tabla base",
+    "V2": "volqueta de 2 ejes",
+    "V3": "volqueta de 3 ejes",
+    "V4": "volqueta de 4 ejes",
 }
 
 TONELADAS_REFERENCIA = {
@@ -505,10 +544,12 @@ def ensure_vehiculos_cache() -> None:
             detalle = str(item.get("detalle_tipo_vehiculo") or "").strip()
             if not tipo:
                 continue
-            aliases[tipo] = tipo
-            aliases[tipo.replace("C", "", 1)] = tipo
+            aliases[normalizar_texto_libre(tipo)] = tipo
+            alias_sin_c = tipo.removeprefix("C")
+            if alias_sin_c and alias_sin_c[0].isdigit():
+                aliases[normalizar_texto_libre(alias_sin_c)] = tipo
             if analisis:
-                aliases[analisis] = tipo
+                aliases[normalizar_texto_libre(analisis)] = tipo
             details[tipo] = {
                 "tipo_vehiculo": tipo,
                 "configuracion_analisis": analisis or None,
@@ -630,6 +671,7 @@ def inferir_ruta_con_municipios(texto: str) -> dict | None:
 
 def recortar_destino(destino_raw: str) -> str:
     palabras_opcion = {"VACIO", "VACÍO", "CARGADO"}
+    vehiculo_tokens = set(VEHICULOS_VALIDOS) | get_vehicle_alias_tokens()
     destino_parts = destino_raw.split()
     destino_clean = []
     for index in range(len(destino_parts)):
@@ -639,7 +681,7 @@ def recortar_destino(destino_raw: str) -> str:
             break
         if re.match(r"^H\d+(?:[.,]\d+)?[.,;:]?$", part, re.IGNORECASE):
             break
-        if part.upper() in VEHICULOS_VALIDOS:
+        if part.upper().strip(".,;:") in vehiculo_tokens:
             break
         if re.match(r"^\d+(?:[.,]\d+)?$", part) and index + 1 < len(destino_parts):
             siguiente = destino_parts[index + 1].upper()
@@ -658,7 +700,8 @@ def limpiar_parametros_consulta_texto(texto: str | None) -> str:
     cleaned = re.sub(r"\bH\s*\d+(?:[.,]\d+)?\b", " ", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\b\d+(?:[.,]\d+)?\s*(?:horas|hora|hrs|hr|h)\b", " ", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\b\d+(?:[.,]\d+)?\s*(?:toneladas|tonelada|tons|ton)\b", " ", cleaned, flags=re.IGNORECASE)
-    for vehiculo in sorted(VEHICULOS_VALIDOS, key=len, reverse=True):
+    vehiculo_tokens = set(VEHICULOS_VALIDOS) | get_vehicle_alias_tokens()
+    for vehiculo in sorted(vehiculo_tokens, key=len, reverse=True):
         cleaned = re.sub(rf"\b{re.escape(vehiculo)}\b", " ", cleaned, flags=re.IGNORECASE)
     return re.sub(r"\s+", " ", cleaned).strip(" ,.;:-")
 
@@ -811,6 +854,12 @@ def parsear_ruta_por_lineas(texto: str) -> dict | None:
     return None
 
 
+def get_vehicle_alias_tokens() -> set[str]:
+    ensure_vehiculos_cache()
+    aliases = VEHICULOS_CACHE.get("aliases") or {}
+    return {str(alias).strip().upper() for alias in aliases if str(alias).strip()} | set(VEHICULO_ALIASES_FALLBACK)
+
+
 def parsear_ruta(texto: str) -> dict | None:
     texto_base, _ = strip_intent_prefixes(texto)
     texto_base = limpiar_parametros_consulta_texto(texto_base)
@@ -883,9 +932,13 @@ def parsear_vehiculo(texto: str) -> str | None:
             return aliases.get(alias)
     texto_upper = texto.upper()
     for vehiculo in sorted(VEHICULOS_VALIDOS, key=len, reverse=True):
-        if vehiculo in texto_upper:
+        if re.search(rf"\b{re.escape(vehiculo)}\b", texto_upper):
             return vehiculo
-        if vehiculo.replace("C", "", 1) in texto_upper:
+        alias_sin_c = vehiculo.removeprefix("C")
+        if alias_sin_c and alias_sin_c[0].isdigit() and re.search(rf"\b{re.escape(alias_sin_c)}\b", texto_upper):
+            return vehiculo
+    for alias, vehiculo in VEHICULO_ALIASES_FALLBACK.items():
+        if re.search(rf"\b{re.escape(alias)}\b", texto_upper):
             return vehiculo
     return None
 
@@ -941,6 +994,11 @@ def usuario_pide_otra_hora(texto: str) -> bool:
 def usuario_pide_vacio(texto: str) -> bool:
     texto_lower = texto.lower()
     return "vacio" in texto_lower or "vacío" in texto_lower
+
+
+def usuario_pide_contenedor_vacio(texto: str) -> bool:
+    texto_normalizado = normalizar_lookup_texto(texto)
+    return "CONTENEDOR" in texto_normalizado and "VACIO" in texto_normalizado
 
 
 def usuario_pide_modo_plus(texto: str) -> bool:
@@ -1043,7 +1101,7 @@ GEMINI_ROUTE_JSON_SCHEMA = {
         "destino": {"type": ["string", "null"], "description": "Municipio o ciudad de destino."},
         "vehiculo": {
             "type": ["string", "null"],
-            "description": "Configuracion vehicular canonica. Si aplica, usa una opcion como C3S3, C3S2, C2S3, C2S2, C2910, C2M10, C3 o V3.",
+            "description": "Configuracion vehicular canonica. Usa una de: C278, C289, C2910, C258, C28105, CA, C2M10, C3, C2S2, C2S3, C3S2, C3S3, V2, V3 o V4.",
         },
         "carroceria": {
             "type": ["string", "null"],
@@ -1337,8 +1395,9 @@ def mensaje_ayuda() -> str:
 
 
 def mensaje_opciones() -> str:
+    configuraciones = ", ".join(VEHICULOS_VALIDOS)
     return (
-        "Configuraciones: C278, C289, C2910, C2M10, C3, C2S2, C2S3, C3S2, C3S3 y V3.\n\n"
+        f"Configuraciones: {configuraciones}.\n\n"
         "Tambien puedes escribirlas sin la C cuando aplique: 2S2, 2S3, 3S2, 3S3.\n\n"
         "Carrocerias:\n"
         "- General - Estacas\n"
@@ -1360,6 +1419,8 @@ def mensaje_opciones() -> str:
         "- Cali a Buenaventura portacontenedores\n"
         "- Bogota a Barranquilla C3S3 furgon refrigerado\n"
         "- Cartagena a Bogota C2S2 estacas\n"
+        "- Bogota a Cali C258\n"
+        "- Bogota a Cali V4 volco\n"
         "- Si ya calculaste una ruta y quieres cambiar vehiculo o carroceria, escribe: cambiar configuracion\n\n"
         "Tambien puedes escribir ayuda o cambiar configuracion."
     )
@@ -2580,9 +2641,9 @@ def send_whatsapp_list(to: str, body: str, button_text: str, sections: list[dict
     )
 
 
-def build_vehicle_rows() -> list[dict]:
+def build_vehicle_rows(vehicles: list[str] | None = None) -> list[dict]:
     rows = []
-    for vehiculo in VEHICULOS_VALIDOS:
+    for vehiculo in vehicles or VEHICULOS_VALIDOS:
         detalle = get_vehicle_detail(vehiculo) or {}
         descripcion = detalle.get("detalle_tipo_vehiculo") or VEHICULO_DESCRIPCIONES.get(vehiculo) or ""
         row = {
@@ -2634,15 +2695,33 @@ def send_configuration_menu(to: str):
     )
 
 
-def send_vehicle_selector(to: str):
+def send_vehicle_group_selector(to: str):
+    send_whatsapp_buttons(
+        to=to,
+        body="Elige el grupo de configuracion vehicular.",
+        buttons=[
+            {"id": "vehicle_group:livianos", "title": "Livianos"},
+            {"id": "vehicle_group:carga", "title": "Carga pesada"},
+            {"id": "vehicle_group:volquetas", "title": "Volquetas"},
+        ],
+        footer="ATICA",
+    )
+
+
+def send_vehicle_selector(to: str, group_key: str):
+    group = VEHICLE_GROUPS.get(group_key) or {}
+    vehicles = group.get("vehicles") or []
+    if not vehicles:
+        send_whatsapp_message(to=to, body="No encontre ese grupo de vehiculos. Escribe: opciones.")
+        return
     send_whatsapp_list(
         to=to,
         body="Elige tu configuracion preferida. La guardo para esta conversacion y luego me escribes la ruta.",
         button_text="Elegir vehiculo",
         sections=[
             {
-                "title": "Configuraciones",
-                "rows": build_vehicle_rows(),
+                "title": group.get("title") or "Configuraciones",
+                "rows": build_vehicle_rows(vehicles),
             }
         ],
         footer="Tambien puedes escribirla directo",
@@ -2749,9 +2828,9 @@ async def receive_message(request: Request):
 
     if user_text.startswith("config:"):
         if user_text == "config:vehicle_menu":
-            state["pending_selection"] = "vehicle"
-            send_vehicle_selector(from_number)
-            return {"status": "vehicle selector sent"}
+            state["pending_selection"] = "vehicle_group"
+            send_vehicle_group_selector(from_number)
+            return {"status": "vehicle group selector sent"}
         if user_text == "config:body_menu":
             state["pending_selection"] = "body_group"
             send_body_group_selector(from_number)
@@ -2759,6 +2838,12 @@ async def receive_message(request: Request):
         if user_text == "config:options_text":
             send_whatsapp_message(to=from_number, body=mensaje_opciones())
             return {"status": "options sent"}
+
+    if user_text.startswith("vehicle_group:"):
+        group_key = user_text.split(":", 1)[1]
+        state["pending_selection"] = f"vehicle:{group_key}"
+        send_vehicle_selector(from_number, group_key)
+        return {"status": "vehicle selector sent", "group": group_key}
 
     if user_text.startswith("body_group:"):
         group_key = user_text.split(":", 1)[1]
@@ -2770,8 +2855,17 @@ async def receive_message(request: Request):
         vehiculo_elegido = user_text.split(":", 1)[1].strip().upper()
         if vehiculo_elegido in VEHICULOS_VALIDOS:
             set_preferred_vehicle(state, vehiculo_elegido)
+            carroceria_requerida = VOLQUETA_BODY_TYPE if vehiculo_elegido in VOLQUETA_VEHICLES else None
+            if carroceria_requerida:
+                set_preferred_body_type(state, carroceria_requerida)
             state["pending_selection"] = None
-            send_whatsapp_message(to=from_number, body=mensaje_configuracion_guardada(vehiculo=vehiculo_elegido))
+            send_whatsapp_message(
+                to=from_number,
+                body=mensaje_configuracion_guardada(
+                    vehiculo=vehiculo_elegido,
+                    carroceria=carroceria_requerida,
+                ),
+            )
             capture_lead_event(
                 {
                     "event": "preferred_vehicle_updated",
@@ -2911,21 +3005,33 @@ async def receive_message(request: Request):
         return {"status": "body selector sent from text"}
 
     if usuario_pide_vacio(user_text):
-        msg = (
-            "Por ahora este canal solo entrega valores cargados.\n\n"
-            "Escribe la ruta asi: Bogota a Barranquilla C3S3."
-        )
+        if usuario_pide_contenedor_vacio(user_text):
+            msg = (
+                "Un contenedor vacio transportado no es un viaje en vacio. "
+                "En SICE-TAC se registra como CARGADO, porque el contenedor es la carga.\n\n"
+                "Estamos terminando de publicar esa categoria separada para no mezclarla con un camion que retorna sin carga."
+            )
+            event_name = "container_empty_pending_request"
+            status_name = "container empty pending"
+        else:
+            msg = (
+                "Viaje en vacio significa que el vehiculo va sin mercancia y sin contenedor. "
+                "La fuente SICE-TAC ya fue validada, pero este canal aun no publica ese valor hasta completar la capa oficial de VACIO.\n\n"
+                "Por ahora puedes consultar el trayecto cargado."
+            )
+            event_name = "empty_trip_pending_request"
+            status_name = "empty trip pending"
         send_whatsapp_message(to=from_number, body=msg)
         capture_lead_event(
             {
-                "event": "unsupported_vacio_request",
+                "event": event_name,
                 "ts": utcnow_iso(),
                 "channel": "whatsapp",
                 "lead": state["lead"],
                 "message": user_text,
             }
         )
-        return {"status": "unsupported vacio"}
+        return {"status": status_name}
 
     analisis_busqueda = analizar_texto_busqueda(user_text)
     openai_extraction = None
@@ -3053,6 +3159,19 @@ async def receive_message(request: Request):
         set_preferred_vehicle(state, vehiculo_detectado)
     if carroceria_detectada:
         set_preferred_body_type(state, carroceria_detectada)
+
+    if vehiculo in VOLQUETA_VEHICLES:
+        if carroceria_detectada and normalizar_carroceria(carroceria_detectada) != VOLQUETA_BODY_TYPE:
+            send_whatsapp_message(
+                to=from_number,
+                body=(
+                    f"La configuracion {vehiculo} es una volqueta y en el catalogo actual se consulta con "
+                    f"{quitar_tildes(VOLQUETA_BODY_TYPE)}. Escribe la ruta nuevamente usando volco."
+                ),
+            )
+            return {"status": "incompatible vehicle body", "vehicle": vehiculo}
+        carroceria = VOLQUETA_BODY_TYPE
+        set_preferred_body_type(state, carroceria)
 
     pide_modo_plus = usuario_pide_modo_plus(user_text) or (
         not ruta_en_mensaje_actual
