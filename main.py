@@ -1,5 +1,5 @@
 """
-ATICA WhatsApp Bridge v3.7.0
+ATICA WhatsApp Bridge v3.7.1
 Conecta WhatsApp Cloud API con la API SICETAC y, de forma opcional,
 con modelos externos para extraer mejor la ruta cuando el parser por codigo
 no logra cerrarla.
@@ -19,7 +19,7 @@ import requests
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("atica-whatsapp")
 
-app = FastAPI(title="ATICA WhatsApp Bridge", version="3.7.0")
+app = FastAPI(title="ATICA WhatsApp Bridge", version="3.7.1")
 
 
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "aticatoken123")
@@ -1749,6 +1749,7 @@ def _variantes_resultado_sicetac(data: dict | None) -> list[dict]:
             "NOMBRE_SICE": detalle.get("nombre_sice") or "Ruta principal",
             "RUTA": detalle.get("ruta"),
             "totales": totales,
+            "detalle_lookup": detalle,
         }
     ]
 
@@ -1771,18 +1772,24 @@ def _clave_corredor_inverso(
     return " ".join(corredor) or "DIRECTA"
 
 
-def _sumar_totales_viaje_redondo(ida: dict, regreso: dict) -> dict[str, float | None]:
+def _calcular_total_viaje_redondo(
+    ida: dict,
+    regreso: dict,
+) -> dict[str, float | None]:
     ida_totales = ida.get("totales") or {}
-    regreso_totales = regreso.get("totales") or {}
-    totales: dict[str, float | None] = {}
-    for escenario in ("H2", "H4", "H8"):
-        ida_valor = ida_totales.get(escenario)
-        regreso_valor = regreso_totales.get(escenario)
-        if ida_valor is None or regreso_valor is None:
-            totales[escenario] = None
-        else:
-            totales[escenario] = round(float(ida_valor) + float(regreso_valor), 2)
-    return totales
+    regreso_detalle = regreso.get("detalle_lookup") or {}
+    ida_h8 = ida_totales.get("H8")
+    vacio_logistica = regreso_detalle.get("movilizacion")
+    total = None
+    if ida_h8 is not None and vacio_logistica is not None:
+        total = round(float(ida_h8) + float(vacio_logistica), 2)
+    return {
+        "cargado_h8": float(ida_h8) if ida_h8 is not None else None,
+        "vacio_logistica": (
+            float(vacio_logistica) if vacio_logistica is not None else None
+        ),
+        "total": total,
+    }
 
 
 def emparejar_variantes_viaje_redondo(
@@ -1796,7 +1803,7 @@ def emparejar_variantes_viaje_redondo(
             "clave_corredor": "DIRECTA",
             "ida": ida_variantes[0],
             "regreso": regreso_variantes[0],
-            "totales": _sumar_totales_viaje_redondo(
+            "total_viaje": _calcular_total_viaje_redondo(
                 ida_variantes[0], regreso_variantes[0]
             ),
         }
@@ -1829,7 +1836,7 @@ def emparejar_variantes_viaje_redondo(
                 "clave_corredor": clave,
                 "ida": variante,
                 "regreso": inversa,
-                "totales": _sumar_totales_viaje_redondo(variante, inversa),
+                "total_viaje": _calcular_total_viaje_redondo(variante, inversa),
             }
         )
 
@@ -1914,8 +1921,11 @@ def formatear_viaje_redondo_con_vacio(data: dict) -> str:
     pares = data.get("pares") or []
     lineas = [
         "VIAJE REDONDO CON VACÍO",
-        f"Ida: {origen} a {destino} | Cargado",
-        f"Regreso: {destino} a {origen} | Vacio sin mercancia ni contenedor",
+        f"Ida: {origen} a {destino} | Cargado H8",
+        (
+            f"Regreso: {destino} a {origen} | Vacio, solo movilizacion "
+            "logistica (sin horas)"
+        ),
         f"Configuracion: {configuracion} | Carroceria: {carroceria}",
     ]
     if data.get("mes"):
@@ -1932,17 +1942,17 @@ def formatear_viaje_redondo_con_vacio(data: dict) -> str:
             id_regreso = regreso.get("ID_SICE") or regreso.get("RUTASID") or "?"
             lineas.append(f"{index}. {nombre}")
             lineas.append(f"IDs: ida {id_ida} | regreso {id_regreso}")
-            ida_totales = ida.get("totales") or {}
-            regreso_totales = regreso.get("totales") or {}
-            totales = par.get("totales") or {}
-            for escenario in ("H2", "H4", "H8"):
-                if totales.get(escenario) is None:
-                    continue
+            total_viaje = par.get("total_viaje") or {}
+            if total_viaje.get("total") is None:
                 lineas.append(
-                    f"{escenario}: {fmt_cop(ida_totales.get(escenario))} cargado + "
-                    f"{fmt_cop(regreso_totales.get(escenario))} vacio = "
-                    f"{fmt_cop(totales.get(escenario))} total"
+                    "No fue posible obtener H8 cargado y la movilizacion vacia."
                 )
+                continue
+            lineas.append(
+                f"{fmt_cop(total_viaje.get('cargado_h8'))} cargado H8 + "
+                f"{fmt_cop(total_viaje.get('vacio_logistica'))} vacio logistica = "
+                f"{fmt_cop(total_viaje.get('total'))} total"
+            )
     else:
         lineas.append(
             "Los dos sentidos tienen valores oficiales, pero no pude emparejar sus variantes de corredor con seguridad."
@@ -3489,7 +3499,7 @@ async def receive_message(request: Request):
                         {
                             "outbound_id": (par.get("ida") or {}).get("ID_SICE"),
                             "return_id": (par.get("regreso") or {}).get("ID_SICE"),
-                            "totals": par.get("totales"),
+                            "round_trip_total": par.get("total_viaje"),
                         }
                         for par in (resultado_redondo.get("pares") or [])
                     ],

@@ -56,7 +56,7 @@ class VacioFlowTests(unittest.TestCase):
             "Bogotá",
         )
 
-    def test_pairs_inverse_corridors_and_sums_each_scenario(self) -> None:
+    def test_pairs_inverse_corridors_with_loaded_h8_and_empty_logistics(self) -> None:
         ida = {
             "origen": "Buenaventura",
             "destino": "Bogotá",
@@ -76,6 +76,7 @@ class VacioFlowTests(unittest.TestCase):
                     "ID_SICE": "11456",
                     "NOMBRE_SICE": "BOGOTA - BUENAVENTURA VIA PEREIRA CARTAGO LA PAILA",
                     "totales": {"H2": 70, "H4": 70, "H8": 70},
+                    "detalle_lookup": {"movilizacion": 50, "valor_hora": 10},
                 }
             ],
         }
@@ -88,8 +89,12 @@ class VacioFlowTests(unittest.TestCase):
         self.assertFalse(ida_sin_pareja)
         self.assertFalse(regreso_sin_pareja)
         self.assertEqual(
-            pares[0]["totales"],
-            {"H2": 170.0, "H4": 190.0, "H8": 230.0},
+            pares[0]["total_viaje"],
+            {
+                "cargado_h8": 160.0,
+                "vacio_logistica": 50.0,
+                "total": 210.0,
+            },
         )
 
     @patch("main.consultar_sicetac")
@@ -108,7 +113,12 @@ class VacioFlowTests(unittest.TestCase):
             "metodo": "lookup_vacio_oficial",
             "mes": 202607,
             "totales": {"H2": 70, "H4": 70, "H8": 70},
-            "detalle_lookup": {"rutasid": "95", "nombre_sice": "Ruta directa"},
+            "detalle_lookup": {
+                "rutasid": "95",
+                "nombre_sice": "Ruta directa",
+                "movilizacion": 50,
+                "valor_hora": 10,
+            },
         }
         consultar.side_effect = [ida, regreso]
 
@@ -124,10 +134,15 @@ class VacioFlowTests(unittest.TestCase):
         )
 
         self.assertFalse(resultado.get("_error"))
-        self.assertEqual(resultado["pares"][0]["totales"]["H8"], 230.0)
+        self.assertEqual(resultado["pares"][0]["total_viaje"]["total"], 210.0)
         self.assertEqual(consultar.call_args_list[0].kwargs["modo_viaje"], "CARGADO")
         self.assertEqual(consultar.call_args_list[1].kwargs["modo_viaje"], "VACIO")
         self.assertEqual(consultar.call_args_list[1].kwargs["origen"], "Bogotá")
+
+        message = main.formatear_viaje_redondo_con_vacio(resultado)
+        self.assertIn("$160 cargado H8 + $50 vacio logistica = $210 total", message)
+        self.assertNotIn("H2:", message)
+        self.assertNotIn("H4:", message)
 
 
 if __name__ == "__main__":
