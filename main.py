@@ -1,5 +1,5 @@
 """
-ATICA WhatsApp Bridge v3.6.0
+ATICA WhatsApp Bridge v3.7.0
 Conecta WhatsApp Cloud API con la API SICETAC y, de forma opcional,
 con modelos externos para extraer mejor la ruta cuando el parser por codigo
 no logra cerrarla.
@@ -19,7 +19,7 @@ import requests
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("atica-whatsapp")
 
-app = FastAPI(title="ATICA WhatsApp Bridge", version="3.6.0")
+app = FastAPI(title="ATICA WhatsApp Bridge", version="3.7.0")
 
 
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "aticatoken123")
@@ -677,6 +677,8 @@ def recortar_destino(destino_raw: str) -> str:
     for index in range(len(destino_parts)):
         remaining = " ".join(destino_parts[index:])
         part = destino_parts[index]
+        if normalizar_lookup_texto(remaining).startswith("VIAJE REDONDO"):
+            break
         if part.upper() in palabras_opcion:
             break
         if re.match(r"^H\d+(?:[.,]\d+)?[.,;:]?$", part, re.IGNORECASE):
@@ -697,6 +699,12 @@ def recortar_destino(destino_raw: str) -> str:
 
 def limpiar_parametros_consulta_texto(texto: str | None) -> str:
     cleaned = str(texto or "")
+    cleaned = re.sub(
+        r"\bviaje\s+redondo\s+con\s+vac[ií]o\b",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
     cleaned = re.sub(r"\bH\s*\d+(?:[.,]\d+)?\b", " ", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\b\d+(?:[.,]\d+)?\s*(?:horas|hora|hrs|hr|h)\b", " ", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\b\d+(?:[.,]\d+)?\s*(?:toneladas|tonelada|tons|ton)\b", " ", cleaned, flags=re.IGNORECASE)
@@ -1007,6 +1015,14 @@ def usuario_pide_contenedor_vacio(texto: str) -> bool:
         re.search(r"\bCONTENEDOR(?:ES)?\b", texto_normalizado)
         and re.search(r"\bVACIO\b", texto_normalizado)
     )
+
+
+def usuario_pide_viaje_redondo(texto: str) -> bool:
+    return "VIAJE REDONDO" in normalizar_lookup_texto(texto)
+
+
+def usuario_pide_viaje_redondo_con_vacio(texto: str) -> bool:
+    return "VIAJE REDONDO CON VACIO" in normalizar_lookup_texto(texto)
 
 
 def usuario_pide_modo_plus(texto: str) -> bool:
@@ -1402,7 +1418,7 @@ def mensaje_ayuda() -> str:
         "- Cali a Buenaventura portacontenedores\n"
         "- Bogota a Barranquilla C3S3 furgon refrigerado\n"
         "- Cartagena a Bogota C2S2 estacas\n"
-        "- Bogota a Buenaventura C2S2 vacio portacontenedores\n"
+        "- Buenaventura a Bogota C2S2 portacontenedores viaje redondo con vacío\n"
         "- Para cambiar una ruta ya calculada: escribe cambiar configuracion y elige C2S2\n\n"
         "Escribe la ruta que quieres que analicemos hoy."
     )
@@ -1435,7 +1451,7 @@ def mensaje_opciones() -> str:
         "- Cartagena a Bogota C2S2 estacas\n"
         "- Bogota a Cali C258\n"
         "- Bogota a Cali V4 volco\n"
-        "- Bogota a Buenaventura C2S2 vacio portacontenedores\n"
+        "- Buenaventura a Bogota C2S2 portacontenedores viaje redondo con vacío\n"
         "- Si ya calculaste una ruta y quieres cambiar vehiculo o carroceria, escribe: cambiar configuracion\n\n"
         "Tambien puedes escribir ayuda o cambiar configuracion."
     )
@@ -1713,6 +1729,238 @@ def consultar_sicetac(
     except Exception as e:
         logger.error(f"SICETAC exception: {e}")
         return None
+
+
+def _variantes_resultado_sicetac(data: dict | None) -> list[dict]:
+    if not data:
+        return []
+    variantes = ordenar_variantes_sicetac(data.get("variantes") or [])
+    if variantes:
+        return variantes
+    totales = data.get("totales") or {}
+    if not totales:
+        return []
+    detalle = data.get("detalle_lookup") or {}
+    rutasid = detalle.get("rutasid")
+    return [
+        {
+            "ID_SICE": rutasid,
+            "RUTASID": rutasid,
+            "NOMBRE_SICE": detalle.get("nombre_sice") or "Ruta principal",
+            "RUTA": detalle.get("ruta"),
+            "totales": totales,
+        }
+    ]
+
+
+def _clave_corredor_inverso(
+    variante: dict,
+    origen: str,
+    destino: str,
+) -> str:
+    nombre = variante.get("NOMBRE_SICE") or ""
+    tokens = re.findall(r"[A-Z0-9]+", normalizar_lookup_texto(nombre))
+    excluir = set(
+        re.findall(
+            r"[A-Z0-9]+",
+            normalizar_lookup_texto(f"{origen} {destino}"),
+        )
+    )
+    excluir.add("VIA")
+    corredor = sorted({token for token in tokens if token not in excluir})
+    return " ".join(corredor) or "DIRECTA"
+
+
+def _sumar_totales_viaje_redondo(ida: dict, regreso: dict) -> dict[str, float | None]:
+    ida_totales = ida.get("totales") or {}
+    regreso_totales = regreso.get("totales") or {}
+    totales: dict[str, float | None] = {}
+    for escenario in ("H2", "H4", "H8"):
+        ida_valor = ida_totales.get(escenario)
+        regreso_valor = regreso_totales.get(escenario)
+        if ida_valor is None or regreso_valor is None:
+            totales[escenario] = None
+        else:
+            totales[escenario] = round(float(ida_valor) + float(regreso_valor), 2)
+    return totales
+
+
+def emparejar_variantes_viaje_redondo(
+    ida: dict,
+    regreso: dict,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    ida_variantes = _variantes_resultado_sicetac(ida)
+    regreso_variantes = _variantes_resultado_sicetac(regreso)
+    if len(ida_variantes) == 1 and len(regreso_variantes) == 1:
+        par = {
+            "clave_corredor": "DIRECTA",
+            "ida": ida_variantes[0],
+            "regreso": regreso_variantes[0],
+            "totales": _sumar_totales_viaje_redondo(
+                ida_variantes[0], regreso_variantes[0]
+            ),
+        }
+        return [par], [], []
+
+    regreso_por_corredor: dict[str, list[dict]] = {}
+    for variante in regreso_variantes:
+        clave = _clave_corredor_inverso(
+            variante,
+            regreso.get("origen") or "",
+            regreso.get("destino") or "",
+        )
+        regreso_por_corredor.setdefault(clave, []).append(variante)
+
+    pares: list[dict] = []
+    ida_sin_pareja: list[dict] = []
+    for variante in ida_variantes:
+        clave = _clave_corredor_inverso(
+            variante,
+            ida.get("origen") or "",
+            ida.get("destino") or "",
+        )
+        candidatas = regreso_por_corredor.get(clave) or []
+        if not candidatas:
+            ida_sin_pareja.append(variante)
+            continue
+        inversa = candidatas.pop(0)
+        pares.append(
+            {
+                "clave_corredor": clave,
+                "ida": variante,
+                "regreso": inversa,
+                "totales": _sumar_totales_viaje_redondo(variante, inversa),
+            }
+        )
+
+    regreso_sin_pareja = [
+        variante
+        for variantes in regreso_por_corredor.values()
+        for variante in variantes
+    ]
+    return pares, ida_sin_pareja, regreso_sin_pareja
+
+
+def consultar_viaje_redondo_con_vacio(
+    *,
+    ruta: dict,
+    vehiculo: str,
+    carroceria: str,
+) -> dict:
+    ida = consultar_sicetac(
+        origen=ruta["origen"],
+        destino=ruta["destino"],
+        vehiculo=vehiculo,
+        carroceria=carroceria,
+        modo_viaje="CARGADO",
+        codigo_dane_origen=ruta.get("codigo_dane_origen"),
+        codigo_dane_destino=ruta.get("codigo_dane_destino"),
+        incluir_peajes=True,
+    )
+    regreso = consultar_sicetac(
+        origen=ruta["destino"],
+        destino=ruta["origen"],
+        vehiculo=vehiculo,
+        carroceria=carroceria,
+        modo_viaje="VACIO",
+        codigo_dane_origen=ruta.get("codigo_dane_destino"),
+        codigo_dane_destino=ruta.get("codigo_dane_origen"),
+        incluir_peajes=True,
+    )
+
+    if ida is None or regreso is None:
+        return {"_error": True, "_detail": "No fue posible consultar ambos sentidos."}
+    if ida.get("_error"):
+        return {"_error": True, "_detail": f"Ida cargada: {ida.get('_detail')}"}
+    if regreso.get("_error"):
+        return {"_error": True, "_detail": f"Regreso vacio: {regreso.get('_detail')}"}
+    if ida.get("metodo") != "lookup_consolidado":
+        return {
+            "_error": True,
+            "_detail": "No hay valor oficial cargado para esta configuracion y carroceria.",
+        }
+    if regreso.get("metodo") != "lookup_vacio_oficial":
+        return {
+            "_error": True,
+            "_detail": "No hay valor oficial VACIO para esta configuracion y carroceria.",
+        }
+
+    pares, ida_sin_pareja, regreso_sin_pareja = emparejar_variantes_viaje_redondo(
+        ida, regreso
+    )
+    return {
+        "tipo_consulta": "VIAJE_REDONDO_CON_VACIO",
+        "origen": ruta["origen"],
+        "destino": ruta["destino"],
+        "configuracion": vehiculo,
+        "carroceria": carroceria,
+        "mes": ida.get("mes") or regreso.get("mes"),
+        "ida": ida,
+        "regreso": regreso,
+        "pares": pares,
+        "ida_sin_pareja": ida_sin_pareja,
+        "regreso_sin_pareja": regreso_sin_pareja,
+    }
+
+
+def formatear_viaje_redondo_con_vacio(data: dict) -> str:
+    if data.get("_error"):
+        return f"No pude calcular el viaje redondo con vacío: {quitar_tildes(data.get('_detail'))}"
+
+    origen = quitar_tildes(data.get("origen") or "?")
+    destino = quitar_tildes(data.get("destino") or "?")
+    configuracion = data.get("configuracion") or DEFAULT_VEHICULO
+    carroceria = quitar_tildes(data.get("carroceria") or DEFAULT_CARROCERIA)
+    pares = data.get("pares") or []
+    lineas = [
+        "VIAJE REDONDO CON VACÍO",
+        f"Ida: {origen} a {destino} | Cargado",
+        f"Regreso: {destino} a {origen} | Vacio sin mercancia ni contenedor",
+        f"Configuracion: {configuracion} | Carroceria: {carroceria}",
+    ]
+    if data.get("mes"):
+        lineas.append(f"Periodo: {data.get('mes')}")
+    lineas.append("")
+
+    if pares:
+        lineas.append(f"Alternativas oficiales emparejadas: {len(pares)}")
+        for index, par in enumerate(pares, start=1):
+            ida = par.get("ida") or {}
+            regreso = par.get("regreso") or {}
+            nombre = quitar_tildes(ida.get("NOMBRE_SICE") or f"Alternativa {index}")
+            id_ida = ida.get("ID_SICE") or ida.get("RUTASID") or "?"
+            id_regreso = regreso.get("ID_SICE") or regreso.get("RUTASID") or "?"
+            lineas.append(f"{index}. {nombre}")
+            lineas.append(f"IDs: ida {id_ida} | regreso {id_regreso}")
+            ida_totales = ida.get("totales") or {}
+            regreso_totales = regreso.get("totales") or {}
+            totales = par.get("totales") or {}
+            for escenario in ("H2", "H4", "H8"):
+                if totales.get(escenario) is None:
+                    continue
+                lineas.append(
+                    f"{escenario}: {fmt_cop(ida_totales.get(escenario))} cargado + "
+                    f"{fmt_cop(regreso_totales.get(escenario))} vacio = "
+                    f"{fmt_cop(totales.get(escenario))} total"
+                )
+    else:
+        lineas.append(
+            "Los dos sentidos tienen valores oficiales, pero no pude emparejar sus variantes de corredor con seguridad."
+        )
+
+    pendientes = len(data.get("ida_sin_pareja") or []) + len(
+        data.get("regreso_sin_pareja") or []
+    )
+    if pendientes:
+        lineas.append("")
+        lineas.append(
+            f"Variantes sin pareja inversa: {pendientes}. No se sumaron para evitar mezclar corredores."
+        )
+    lineas.append("")
+    lineas.append(
+        "Para este comportamiento escribe siempre: origen a destino, configuracion, carroceria, viaje redondo con vacío."
+    )
+    return "\n".join(lineas)
 
 
 def consultar_peajes_detalle(id_sice: str | int | None, configuracion: str | None = None) -> dict | None:
@@ -3047,6 +3295,15 @@ async def receive_message(request: Request):
         )
         return {"status": "container empty pending"}
 
+    if usuario_pide_viaje_redondo(user_text) and not usuario_pide_viaje_redondo_con_vacio(user_text):
+        msg = (
+            "Para calcular la ida cargada y el regreso sin carga, escribe el texto completo: "
+            "viaje redondo con vacío.\n\n"
+            "Ejemplo: Buenaventura a Bogota C2S2 portacontenedores viaje redondo con vacío."
+        )
+        send_whatsapp_message(to=from_number, body=msg)
+        return {"status": "round trip empty phrase requested"}
+
     analisis_busqueda = analizar_texto_busqueda(user_text)
     openai_extraction = None
     gemini_extraction = None
@@ -3186,6 +3443,60 @@ async def receive_message(request: Request):
             return {"status": "incompatible vehicle body", "vehicle": vehiculo}
         carroceria = VOLQUETA_BODY_TYPE
         set_preferred_body_type(state, carroceria)
+
+    if usuario_pide_viaje_redondo_con_vacio(user_text):
+        resultado_redondo = consultar_viaje_redondo_con_vacio(
+            ruta=ruta,
+            vehiculo=vehiculo or DEFAULT_VEHICULO,
+            carroceria=carroceria or DEFAULT_CARROCERIA,
+        )
+        respuesta_redondo = formatear_viaje_redondo_con_vacio(resultado_redondo)
+        send_whatsapp_message(to=from_number, body=respuesta_redondo)
+        if resultado_redondo.get("_error"):
+            return {
+                "status": "round trip empty unavailable",
+                "detail": resultado_redondo.get("_detail"),
+            }
+
+        ida_redondo = resultado_redondo.get("ida") or {}
+        state["last_route"] = {
+            "origen": ruta["origen"],
+            "destino": ruta["destino"],
+            "vehiculo": vehiculo or DEFAULT_VEHICULO,
+            "carroceria": carroceria or DEFAULT_CARROCERIA,
+            "modo_viaje": "CARGADO",
+            "round_trip_empty": True,
+            "route_id": extraer_id_sice_principal(ida_redondo),
+            "consulted_at": utcnow_iso(),
+        }
+        state["last_result"] = ida_redondo
+        state["last_round_trip_result"] = resultado_redondo
+        state["last_plus_result"] = None
+        capture_lead_event(
+            {
+                "event": "route_consulted_round_trip_empty",
+                "ts": utcnow_iso(),
+                "channel": "whatsapp",
+                "lead": state["lead"],
+                "route": state["last_route"],
+                "message": user_text,
+                "parse": analisis_busqueda,
+                "sicetac_round_trip": {
+                    "pairs_count": len(resultado_redondo.get("pares") or []),
+                    "unpaired_outbound": len(resultado_redondo.get("ida_sin_pareja") or []),
+                    "unpaired_return": len(resultado_redondo.get("regreso_sin_pareja") or []),
+                    "pairs": [
+                        {
+                            "outbound_id": (par.get("ida") or {}).get("ID_SICE"),
+                            "return_id": (par.get("regreso") or {}).get("ID_SICE"),
+                            "totals": par.get("totales"),
+                        }
+                        for par in (resultado_redondo.get("pares") or [])
+                    ],
+                },
+            }
+        )
+        return {"status": "ok", "mode": "round_trip_empty"}
 
     pide_modo_plus = usuario_pide_modo_plus(user_text) or (
         not ruta_en_mensaje_actual

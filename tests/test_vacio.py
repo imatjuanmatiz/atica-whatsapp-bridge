@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 import main
 
@@ -39,6 +40,94 @@ class VacioFlowTests(unittest.TestCase):
         )
         self.assertIn("Modo: Vacio (sin mercancia ni contenedor)", message)
         self.assertIn("Carroceria: Portacontenedores", message)
+
+    def test_round_trip_trigger_requires_full_phrase(self) -> None:
+        self.assertTrue(main.usuario_pide_viaje_redondo("viaje redondo"))
+        self.assertFalse(
+            main.usuario_pide_viaje_redondo_con_vacio("viaje redondo")
+        )
+        self.assertTrue(
+            main.usuario_pide_viaje_redondo_con_vacio(
+                "Buenaventura a Bogotá viaje redondo con vacío"
+            )
+        )
+        self.assertEqual(
+            main.recortar_destino("Bogotá viaje redondo con vacío"),
+            "Bogotá",
+        )
+
+    def test_pairs_inverse_corridors_and_sums_each_scenario(self) -> None:
+        ida = {
+            "origen": "Buenaventura",
+            "destino": "Bogotá",
+            "variantes": [
+                {
+                    "ID_SICE": "11533",
+                    "NOMBRE_SICE": "BUENAVENTURA - BOGOTA VIA LA PAILA CARTAGO PEREIRA",
+                    "totales": {"H2": 100, "H4": 120, "H8": 160},
+                }
+            ],
+        }
+        regreso = {
+            "origen": "Bogotá",
+            "destino": "Buenaventura",
+            "variantes": [
+                {
+                    "ID_SICE": "11456",
+                    "NOMBRE_SICE": "BOGOTA - BUENAVENTURA VIA PEREIRA CARTAGO LA PAILA",
+                    "totales": {"H2": 70, "H4": 70, "H8": 70},
+                }
+            ],
+        }
+
+        pares, ida_sin_pareja, regreso_sin_pareja = (
+            main.emparejar_variantes_viaje_redondo(ida, regreso)
+        )
+
+        self.assertEqual(len(pares), 1)
+        self.assertFalse(ida_sin_pareja)
+        self.assertFalse(regreso_sin_pareja)
+        self.assertEqual(
+            pares[0]["totales"],
+            {"H2": 170.0, "H4": 190.0, "H8": 230.0},
+        )
+
+    @patch("main.consultar_sicetac")
+    def test_round_trip_queries_loaded_outbound_and_empty_return(self, consultar) -> None:
+        ida = {
+            "origen": "Buenaventura",
+            "destino": "Bogotá",
+            "metodo": "lookup_consolidado",
+            "mes": 202607,
+            "totales": {"H2": 100, "H4": 120, "H8": 160},
+            "detalle_lookup": {"rutasid": "154", "nombre_sice": "Ruta directa"},
+        }
+        regreso = {
+            "origen": "Bogotá",
+            "destino": "Buenaventura",
+            "metodo": "lookup_vacio_oficial",
+            "mes": 202607,
+            "totales": {"H2": 70, "H4": 70, "H8": 70},
+            "detalle_lookup": {"rutasid": "95", "nombre_sice": "Ruta directa"},
+        }
+        consultar.side_effect = [ida, regreso]
+
+        resultado = main.consultar_viaje_redondo_con_vacio(
+            ruta={
+                "origen": "Buenaventura",
+                "destino": "Bogotá",
+                "codigo_dane_origen": "76109000",
+                "codigo_dane_destino": "11001000",
+            },
+            vehiculo="C2S2",
+            carroceria="Portacontenedores",
+        )
+
+        self.assertFalse(resultado.get("_error"))
+        self.assertEqual(resultado["pares"][0]["totales"]["H8"], 230.0)
+        self.assertEqual(consultar.call_args_list[0].kwargs["modo_viaje"], "CARGADO")
+        self.assertEqual(consultar.call_args_list[1].kwargs["modo_viaje"], "VACIO")
+        self.assertEqual(consultar.call_args_list[1].kwargs["origen"], "Bogotá")
 
 
 if __name__ == "__main__":
