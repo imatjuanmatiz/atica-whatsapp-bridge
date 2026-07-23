@@ -1,5 +1,5 @@
 """
-ATICA WhatsApp Bridge v3.5.3
+ATICA WhatsApp Bridge v3.6.0
 Conecta WhatsApp Cloud API con la API SICETAC y, de forma opcional,
 con modelos externos para extraer mejor la ruta cuando el parser por codigo
 no logra cerrarla.
@@ -19,7 +19,7 @@ import requests
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("atica-whatsapp")
 
-app = FastAPI(title="ATICA WhatsApp Bridge", version="3.5.3")
+app = FastAPI(title="ATICA WhatsApp Bridge", version="3.6.0")
 
 
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "aticatoken123")
@@ -952,6 +952,11 @@ def parsear_carroceria(texto: str) -> str | None:
 
 
 def parsear_modo_viaje(texto: str) -> str | None:
+    texto_normalizado = normalizar_lookup_texto(texto)
+    if re.search(r"\bVACIO\b", texto_normalizado):
+        return "VACIO"
+    if re.search(r"\bCARGADO\b", texto_normalizado):
+        return "CARGADO"
     return None
 
 
@@ -998,7 +1003,10 @@ def usuario_pide_vacio(texto: str) -> bool:
 
 def usuario_pide_contenedor_vacio(texto: str) -> bool:
     texto_normalizado = normalizar_lookup_texto(texto)
-    return "CONTENEDOR" in texto_normalizado and "VACIO" in texto_normalizado
+    return bool(
+        re.search(r"\bCONTENEDOR(?:ES)?\b", texto_normalizado)
+        and re.search(r"\bVACIO\b", texto_normalizado)
+    )
 
 
 def usuario_pide_modo_plus(texto: str) -> bool:
@@ -1282,6 +1290,7 @@ def formatear_respuesta(data: dict, *, include_closing: bool = True) -> str:
         destino = quitar_tildes(data.get("destino", "?"))
         config = data.get("configuracion", "C3S3")
         carroceria = quitar_tildes(data.get("carroceria", DEFAULT_CARROCERIA))
+        modo_viaje = (data.get("modo_viaje") or "CARGADO").strip().upper()
         mes = data.get("mes", "")
         descripcion_vehiculo = descripcion_corta_vehiculo(config)
 
@@ -1293,8 +1302,12 @@ def formatear_respuesta(data: dict, *, include_closing: bool = True) -> str:
         lineas = [
             f"Ruta: {origen} a {destino}",
             configuracion_linea,
-            "Referencia SICETAC presentada con H2, H4 y H8: 2, 4 y 8 horas logisticas.",
+            f"Modo: {'Vacio (sin mercancia ni contenedor)' if modo_viaje == 'VACIO' else 'Cargado'}",
         ]
+        if modo_viaje == "VACIO":
+            lineas.append("Referencia oficial VACIO presentada con H2, H4 y H8.")
+        else:
+            lineas.append("Referencia SICETAC presentada con H2, H4 y H8: 2, 4 y 8 horas logisticas.")
         if mes:
             lineas.append(f"Periodo: {mes}")
 
@@ -1389,6 +1402,7 @@ def mensaje_ayuda() -> str:
         "- Cali a Buenaventura portacontenedores\n"
         "- Bogota a Barranquilla C3S3 furgon refrigerado\n"
         "- Cartagena a Bogota C2S2 estacas\n"
+        "- Bogota a Buenaventura C2S2 vacio portacontenedores\n"
         "- Para cambiar una ruta ya calculada: escribe cambiar configuracion y elige C2S2\n\n"
         "Escribe la ruta que quieres que analicemos hoy."
     )
@@ -1421,6 +1435,7 @@ def mensaje_opciones() -> str:
         "- Cartagena a Bogota C2S2 estacas\n"
         "- Bogota a Cali C258\n"
         "- Bogota a Cali V4 volco\n"
+        "- Bogota a Buenaventura C2S2 vacio portacontenedores\n"
         "- Si ya calculaste una ruta y quieres cambiar vehiculo o carroceria, escribe: cambiar configuracion\n\n"
         "Tambien puedes escribir ayuda o cambiar configuracion."
     )
@@ -1901,6 +1916,13 @@ def consultar_modo_plus(
             })
             continue
 
+        if (modo_viaje or "").upper() == "VACIO" and resultado.get("metodo") != "lookup_vacio_oficial":
+            filas.append({
+                "vehiculo": vehiculo,
+                "error": "sin valor oficial VACIO para esta carroceria",
+            })
+            continue
+
         valor = calcular_total_para_horas(resultado, horas)
         id_sice = extraer_id_sice_principal(resultado)
         peajes_resumen = resultado.get("peajes_resumen") or {}
@@ -1923,6 +1945,7 @@ def consultar_modo_plus(
         "origen": ruta["origen"],
         "destino": ruta["destino"],
         "carroceria": carroceria or DEFAULT_CARROCERIA,
+        "modo_viaje": (modo_viaje or "CARGADO").upper(),
         "horas": float(horas),
         "route_id": route_id,
         "mes": mes,
@@ -1936,6 +1959,7 @@ def formatear_modo_plus(data: dict) -> str:
     origen = quitar_tildes(data.get("origen") or "?")
     destino = quitar_tildes(data.get("destino") or "?")
     carroceria = quitar_tildes(data.get("carroceria") or DEFAULT_CARROCERIA)
+    modo_viaje = (data.get("modo_viaje") or "CARGADO").strip().upper()
 
     lineas = [
         f"PLUS SICETAC H{horas_label}",
@@ -1946,6 +1970,7 @@ def formatear_modo_plus(data: dict) -> str:
     if data.get("mes"):
         lineas.append(f"Periodo: {data.get('mes')}")
     lineas.append(f"Carroceria: {carroceria}")
+    lineas.append(f"Modo: {'Vacio' if modo_viaje == 'VACIO' else 'Cargado'}")
     lineas.append("")
 
     filas = data.get("filas") or []
@@ -3004,34 +3029,23 @@ async def receive_message(request: Request):
         )
         return {"status": "body selector sent from text"}
 
-    if usuario_pide_vacio(user_text):
-        if usuario_pide_contenedor_vacio(user_text):
-            msg = (
-                "Un contenedor vacio transportado no es un viaje en vacio. "
-                "En SICE-TAC se registra como CARGADO, porque el contenedor es la carga.\n\n"
-                "Estamos terminando de publicar esa categoria separada para no mezclarla con un camion que retorna sin carga."
-            )
-            event_name = "container_empty_pending_request"
-            status_name = "container empty pending"
-        else:
-            msg = (
-                "Viaje en vacio significa que el vehiculo va sin mercancia y sin contenedor. "
-                "La fuente SICE-TAC ya fue validada, pero este canal aun no publica ese valor hasta completar la capa oficial de VACIO.\n\n"
-                "Por ahora puedes consultar el trayecto cargado."
-            )
-            event_name = "empty_trip_pending_request"
-            status_name = "empty trip pending"
+    if usuario_pide_contenedor_vacio(user_text):
+        msg = (
+            "Un contenedor vacio transportado no es un viaje en vacio. "
+            "En SICE-TAC se registra como CARGADO, porque el contenedor es la carga.\n\n"
+            "Esa categoria se mantendra separada para no mezclarla con un vehiculo que retorna sin mercancia ni contenedor."
+        )
         send_whatsapp_message(to=from_number, body=msg)
         capture_lead_event(
             {
-                "event": event_name,
+                "event": "container_empty_pending_request",
                 "ts": utcnow_iso(),
                 "channel": "whatsapp",
                 "lead": state["lead"],
                 "message": user_text,
             }
         )
-        return {"status": status_name}
+        return {"status": "container empty pending"}
 
     analisis_busqueda = analizar_texto_busqueda(user_text)
     openai_extraction = None
@@ -3255,12 +3269,21 @@ async def receive_message(request: Request):
         send_whatsapp_message(to=from_number, body=fallback_reply)
         return {"status": "sicetac body error", "detail": resultado.get("error")}
 
+    if modo_viaje == "VACIO" and resultado.get("metodo") != "lookup_vacio_oficial":
+        msg = (
+            f"No hay un valor oficial VACIO para {vehiculo or 'esta configuracion'} con "
+            f"{quitar_tildes(carroceria or DEFAULT_CARROCERIA)}. "
+            "Prueba una carroceria disponible para esa configuracion."
+        )
+        send_whatsapp_message(to=from_number, body=msg)
+        return {"status": "official empty value unavailable"}
+
     state["last_route"] = {
         "origen": ruta["origen"],
         "destino": ruta["destino"],
         "vehiculo": vehiculo or "C3S3",
         "carroceria": carroceria,
-        "modo_viaje": modo_viaje,
+        "modo_viaje": resultado.get("modo_viaje") or modo_viaje,
         "route_id": extraer_id_sice_principal(resultado),
         "consulted_at": utcnow_iso(),
     }
