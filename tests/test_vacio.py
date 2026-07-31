@@ -13,6 +13,10 @@ class VacioFlowTests(unittest.TestCase):
         self.assertEqual(main.parsear_carroceria(text), "Portacontenedores")
         self.assertFalse(main.usuario_pide_contenedor_vacio(text))
 
+    def test_help_message_links_to_the_manual(self) -> None:
+        self.assertTrue(main.es_saludo_o_ayuda_simple("ayuda"))
+        self.assertIn(main.SICETAC_MANUAL_URL, main.mensaje_ayuda())
+
     def test_distinguishes_transported_empty_container(self) -> None:
         self.assertTrue(
             main.usuario_pide_contenedor_vacio(

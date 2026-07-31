@@ -30,6 +30,7 @@ SICETAC_API_BASE = os.environ.get(
     "SICETAC_API_URL",
     "https://sicetac-api-mcp.onrender.com",
 ).rstrip("/")
+SICETAC_MANUAL_URL = "https://atiemppo.com/sicetac-al-instante/manual/"
 if SICETAC_API_BASE.endswith("/consulta"):
     SICETAC_API_BASE = SICETAC_API_BASE.replace("/consulta", "")
 
@@ -1407,6 +1408,7 @@ def formatear_respuesta(data: dict, *, include_closing: bool = True) -> str:
             lineas.append("Escribe otra ruta asi: origen a destino.")
             lineas.append("Si quieres ver mas opciones, escribe: opciones.")
             lineas.append("Si quieres cambiar configuracion, escribe: cambiar configuracion.")
+            lineas.append("Para ver todos los comandos y ejemplos, escribe: ayuda.")
         return "\n".join(lineas)
     except Exception as e:
         logger.error(f"Error formateando: {e}")
@@ -1452,6 +1454,7 @@ def mensaje_ayuda() -> str:
         "- Cartagena a Bogota C2S2 estacas\n"
         "- Buenaventura a Bogota C2S2 portacontenedores viaje redondo con vacío\n"
         "- Para cambiar una ruta ya calculada: escribe cambiar configuracion y elige C2S2\n\n"
+        f"Manual completo: {SICETAC_MANUAL_URL}\n\n"
         "Escribe la ruta que quieres que analicemos hoy."
     )
 
