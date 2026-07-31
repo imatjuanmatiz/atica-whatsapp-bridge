@@ -1307,6 +1307,7 @@ def formatear_respuesta(data: dict, *, include_closing: bool = True) -> str:
         config = data.get("configuracion", "C3S3")
         carroceria = quitar_tildes(data.get("carroceria", DEFAULT_CARROCERIA))
         modo_viaje = (data.get("modo_viaje") or "CARGADO").strip().upper()
+        tipo_contenedor = (data.get("tipo_contenedor") or "").strip().upper()
         mes = data.get("mes", "")
         descripcion_vehiculo = descripcion_corta_vehiculo(config)
 
@@ -1318,14 +1319,26 @@ def formatear_respuesta(data: dict, *, include_closing: bool = True) -> str:
         lineas = [
             f"Ruta: {origen} a {destino}",
             configuracion_linea,
-            f"Modo: {'Vacio (sin mercancia ni contenedor)' if modo_viaje == 'VACIO' else 'Cargado'}",
+            (
+                "Modo: Cargado | Carga: Contenedor vacio"
+                if tipo_contenedor == "VACIO"
+                else "Modo: Vacio (sin mercancia ni contenedor)"
+                if modo_viaje == "VACIO"
+                else "Modo: Cargado"
+            ),
         ]
-        if modo_viaje == "VACIO":
+        if tipo_contenedor == "VACIO":
+            lineas.append(
+                "Referencia oficial de contenedor vacio transportado presentada con H2, H4 y H8."
+            )
+        elif modo_viaje == "VACIO":
             lineas.append("Referencia oficial VACIO presentada con H2, H4 y H8.")
         else:
             lineas.append("Referencia SICETAC presentada con H2, H4 y H8: 2, 4 y 8 horas logisticas.")
         if mes:
             lineas.append(f"Periodo: {mes}")
+        if data.get("valor_plaza_no_aplica") == "CONTENEDOR_VACIO":
+            lineas.append("Valor en plaza: no aplica para contenedor vacio.")
 
         if "variantes" in data:
             variantes = ordenar_variantes_sicetac(data["variantes"])
@@ -1416,6 +1429,7 @@ def mensaje_ayuda() -> str:
         "- Bogota a Barranquilla\n"
         "- Medellin a Cartagena C2M10\n"
         "- Cali a Buenaventura portacontenedores\n"
+        "- Cali a Buenaventura C2S2 portacontenedores con contenedor vacio\n"
         "- Bogota a Barranquilla C3S3 furgon refrigerado\n"
         "- Cartagena a Bogota C2S2 estacas\n"
         "- Buenaventura a Bogota C2S2 portacontenedores viaje redondo con vacío\n"
@@ -1442,6 +1456,9 @@ def mensaje_opciones() -> str:
         "- Granel Solido - Estibas\n"
         "- Granel Solido - Plataforma\n"
         "- Granel Liquido - Tanque\n\n"
+        "Para Portacontenedores tambien puedes elegir el tipo de carga:\n"
+        "- Carga normal (contenedor cargado)\n"
+        "- Contenedor vacio transportado: se consulta como CARGADO y no tiene valor en plaza\n\n"
         f"Si no indicas una, uso {DEFAULT_VEHICULO} y {quitar_tildes(DEFAULT_CARROCERIA)}.\n\n"
         "Ejemplos:\n"
         "- Bogota a Barranquilla\n"
@@ -1451,6 +1468,7 @@ def mensaje_opciones() -> str:
         "- Cartagena a Bogota C2S2 estacas\n"
         "- Bogota a Cali C258\n"
         "- Bogota a Cali V4 volco\n"
+        "- Cali a Buenaventura C2S2 portacontenedores con contenedor vacio\n"
         "- Buenaventura a Bogota C2S2 portacontenedores viaje redondo con vacío\n"
         "- Si ya calculaste una ruta y quieres cambiar vehiculo o carroceria, escribe: cambiar configuracion\n\n"
         "Tambien puedes escribir ayuda o cambiar configuracion."
@@ -1589,6 +1607,7 @@ def get_state(phone: str) -> dict:
             "last_plus_result": None,
             "preferred_vehicle": None,
             "preferred_body_type": None,
+            "preferred_container_type": None,
             "pending_selection": None,
         },
     )
@@ -1643,6 +1662,11 @@ def consultar_sicetac(
     codigo_dane_origen: str | None = None,
     codigo_dane_destino: str | None = None,
     incluir_peajes: bool = False,
+    tipo_contenedor: str | None = None,
+    viaje_redondo: bool = False,
+    tipo_contenedor_regreso: str | None = None,
+    rutasid_ida: str | None = None,
+    rutasid_regreso: str | None = None,
 ) -> dict | None:
     payload = {
         "origen": origen,
@@ -1666,6 +1690,16 @@ def consultar_sicetac(
         payload["tarifa_standby"] = tarifa_standby
     if incluir_peajes:
         payload["peajes"] = True
+    if tipo_contenedor:
+        payload["tipo_contenedor"] = tipo_contenedor
+    if viaje_redondo:
+        payload["viaje_redondo"] = True
+    if tipo_contenedor_regreso:
+        payload["tipo_contenedor_regreso"] = tipo_contenedor_regreso
+    if rutasid_ida:
+        payload["rutasid_ida"] = rutasid_ida
+    if rutasid_regreso:
+        payload["rutasid_regreso"] = rutasid_regreso
 
     url = f"{SICETAC_API_BASE}/consulta"
     logger.info(f"SICETAC [{url}] payload: {payload}")
@@ -1854,7 +1888,7 @@ def consultar_viaje_redondo_con_vacio(
     vehiculo: str,
     carroceria: str,
 ) -> dict:
-    ida = consultar_sicetac(
+    resultado = consultar_sicetac(
         origen=ruta["origen"],
         destino=ruta["destino"],
         vehiculo=vehiculo,
@@ -1862,113 +1896,53 @@ def consultar_viaje_redondo_con_vacio(
         modo_viaje="CARGADO",
         codigo_dane_origen=ruta.get("codigo_dane_origen"),
         codigo_dane_destino=ruta.get("codigo_dane_destino"),
-        incluir_peajes=True,
+        viaje_redondo=True,
+        tipo_contenedor="CARGADO",
+        tipo_contenedor_regreso="VACIO",
     )
-    regreso = consultar_sicetac(
-        origen=ruta["destino"],
-        destino=ruta["origen"],
-        vehiculo=vehiculo,
-        carroceria=carroceria,
-        modo_viaje="VACIO",
-        codigo_dane_origen=ruta.get("codigo_dane_destino"),
-        codigo_dane_destino=ruta.get("codigo_dane_origen"),
-        incluir_peajes=True,
-    )
-
-    if ida is None or regreso is None:
-        return {"_error": True, "_detail": "No fue posible consultar ambos sentidos."}
-    if ida.get("_error"):
-        return {"_error": True, "_detail": f"Ida cargada: {ida.get('_detail')}"}
-    if regreso.get("_error"):
-        return {"_error": True, "_detail": f"Regreso vacio: {regreso.get('_detail')}"}
-    if ida.get("metodo") != "lookup_consolidado":
-        return {
-            "_error": True,
-            "_detail": "No hay valor oficial cargado para esta configuracion y carroceria.",
-        }
-    if regreso.get("metodo") != "lookup_vacio_oficial":
-        return {
-            "_error": True,
-            "_detail": "No hay valor oficial VACIO para esta configuracion y carroceria.",
-        }
-
-    pares, ida_sin_pareja, regreso_sin_pareja = emparejar_variantes_viaje_redondo(
-        ida, regreso
-    )
-    return {
-        "tipo_consulta": "VIAJE_REDONDO_CON_VACIO",
-        "origen": ruta["origen"],
-        "destino": ruta["destino"],
-        "configuracion": vehiculo,
-        "carroceria": carroceria,
-        "mes": ida.get("mes") or regreso.get("mes"),
-        "ida": ida,
-        "regreso": regreso,
-        "pares": pares,
-        "ida_sin_pareja": ida_sin_pareja,
-        "regreso_sin_pareja": regreso_sin_pareja,
-    }
+    if resultado is None:
+        return {"_error": True, "_detail": "No fue posible consultar el viaje redondo."}
+    return resultado
 
 
 def formatear_viaje_redondo_con_vacio(data: dict) -> str:
     if data.get("_error"):
         return f"No pude calcular el viaje redondo con vacío: {quitar_tildes(data.get('_detail'))}"
 
-    origen = quitar_tildes(data.get("origen") or "?")
-    destino = quitar_tildes(data.get("destino") or "?")
+    ida = data.get("ida") or {}
+    regreso = data.get("regreso") or {}
+    origen = quitar_tildes(ida.get("origen") or data.get("origen") or "?")
+    destino = quitar_tildes(ida.get("destino") or data.get("destino") or "?")
     configuracion = data.get("configuracion") or DEFAULT_VEHICULO
     carroceria = quitar_tildes(data.get("carroceria") or DEFAULT_CARROCERIA)
-    pares = data.get("pares") or []
     lineas = [
-        "VIAJE REDONDO CON VACÍO",
+        "VIAJE REDONDO CON CONTENEDOR VACÍO",
         f"Ida: {origen} a {destino} | Cargado H8",
-        (
-            f"Regreso: {destino} a {origen} | Vacio, solo movilizacion "
-            "logistica (sin horas)"
-        ),
+        f"Regreso: {destino} a {origen} | Contenedor vacío H8",
         f"Configuracion: {configuracion} | Carroceria: {carroceria}",
     ]
-    if data.get("mes"):
-        lineas.append(f"Periodo: {data.get('mes')}")
-    lineas.append("")
-
-    if pares:
-        lineas.append(f"Alternativas oficiales emparejadas: {len(pares)}")
-        for index, par in enumerate(pares, start=1):
-            ida = par.get("ida") or {}
-            regreso = par.get("regreso") or {}
-            nombre = quitar_tildes(ida.get("NOMBRE_SICE") or f"Alternativa {index}")
-            id_ida = ida.get("ID_SICE") or ida.get("RUTASID") or "?"
-            id_regreso = regreso.get("ID_SICE") or regreso.get("RUTASID") or "?"
-            lineas.append(f"{index}. {nombre}")
-            lineas.append(f"IDs: ida {id_ida} | regreso {id_regreso}")
-            total_viaje = par.get("total_viaje") or {}
-            if total_viaje.get("total") is None:
-                lineas.append(
-                    "No fue posible obtener H8 cargado y la movilizacion vacia."
-                )
-                continue
-            lineas.append(
-                f"{fmt_cop(total_viaje.get('cargado_h8'))} cargado H8 + "
-                f"{fmt_cop(total_viaje.get('vacio_logistica'))} vacio logistica = "
-                f"{fmt_cop(total_viaje.get('total'))} total"
-            )
-    else:
-        lineas.append(
-            "Los dos sentidos tienen valores oficiales, pero no pude emparejar sus variantes de corredor con seguridad."
-        )
-
-    pendientes = len(data.get("ida_sin_pareja") or []) + len(
-        data.get("regreso_sin_pareja") or []
-    )
-    if pendientes:
+    if data.get("requiere_seleccion_ruta"):
         lineas.append("")
-        lineas.append(
-            f"Variantes sin pareja inversa: {pendientes}. No se sumaron para evitar mezclar corredores."
-        )
+        lineas.append("Encontré más de una ruta oficial. Selecciona una alternativa para cada sentido:")
+        for nombre_tramo, tramo in (("Ida", ida), ("Regreso", regreso)):
+            opciones = ordenar_variantes_sicetac(tramo.get("variantes") or [])
+            if opciones:
+                etiquetas = [
+                    f"{item.get('RUTASID') or item.get('ID_SICE')} ({quitar_tildes(item.get('NOMBRE_SICE') or 'ruta')})"
+                    for item in opciones
+                ]
+                lineas.append(f"{nombre_tramo}: " + " | ".join(etiquetas))
+        lineas.append("Escríbeme los IDs que prefieres y te doy el total exacto.")
+    else:
+        totales = data.get("totales") or {}
+        lineas.append("")
+        lineas.append(f"H2 total: {fmt_cop(totales.get('H2'))}")
+        lineas.append(f"H4 total: {fmt_cop(totales.get('H4'))}")
+        lineas.append(f"H8 total: {fmt_cop(totales.get('H8'))}")
+        lineas.append("El valor en plaza no aplica al regreso con contenedor vacío.")
     lineas.append("")
     lineas.append(
-        "Para este comportamiento escribe siempre: origen a destino, configuracion, carroceria, viaje redondo con vacío."
+        "Para este comportamiento escribe: origen a destino, configuración, portacontenedores, viaje redondo con vacío."
     )
     return "\n".join(lineas)
 
@@ -3043,6 +3017,21 @@ def send_body_selector(to: str, group_key: str):
     )
 
 
+def send_container_type_selector(to: str):
+    send_whatsapp_buttons(
+        to=to,
+        body=(
+            "Para Portacontenedores, elige el tipo de carga. "
+            "El contenedor vacío se calcula como viaje cargado y no lleva valor en plaza."
+        ),
+        buttons=[
+            {"id": "container:loaded", "title": "Carga normal"},
+            {"id": "container:empty", "title": "Contenedor vacio"},
+        ],
+        footer="ATICA",
+    )
+
+
 @app.get("/")
 async def health():
     return {
@@ -3165,6 +3154,11 @@ async def receive_message(request: Request):
         carroceria_normalizada = normalizar_carroceria(carroceria_elegida)
         if carroceria_normalizada in CARROCERIAS_VALIDAS:
             set_preferred_body_type(state, carroceria_normalizada)
+            if carroceria_normalizada == "Portacontenedores":
+                state["pending_selection"] = "container_type"
+                send_container_type_selector(from_number)
+                return {"status": "container type selector sent"}
+            state["preferred_container_type"] = None
             state["pending_selection"] = None
             send_whatsapp_message(
                 to=from_number,
@@ -3180,6 +3174,38 @@ async def receive_message(request: Request):
                 }
             )
             return {"status": "preferred body updated"}
+
+    if user_text.startswith("container:"):
+        seleccion = user_text.split(":", 1)[1].strip().lower()
+        if seleccion in {"loaded", "empty"}:
+            set_preferred_body_type(state, "Portacontenedores")
+            state["preferred_container_type"] = "VACIO" if seleccion == "empty" else None
+            state["pending_selection"] = None
+            detalle = (
+                "Portacontenedores con contenedor vacío transportado"
+                if seleccion == "empty"
+                else "Portacontenedores con carga normal"
+            )
+            send_whatsapp_message(
+                to=from_number,
+                body=(
+                    f"Listo. Guardaré {detalle} para esta conversación.\n\n"
+                    "Ahora escribe la ruta así: origen a destino."
+                ),
+            )
+            capture_lead_event(
+                {
+                    "event": "preferred_container_type_updated",
+                    "ts": utcnow_iso(),
+                    "channel": "whatsapp",
+                    "lead": state["lead"],
+                    "selection": {
+                        "preferred_body_type": "Portacontenedores",
+                        "preferred_container_type": state["preferred_container_type"],
+                    },
+                }
+            )
+            return {"status": "preferred container type updated"}
 
     texto_lower = user_text.lower().strip()
     if es_saludo_o_ayuda_simple(user_text) and not parsear_ruta(user_text):
@@ -3286,24 +3312,6 @@ async def receive_message(request: Request):
             }
         )
         return {"status": "body selector sent from text"}
-
-    if usuario_pide_contenedor_vacio(user_text):
-        msg = (
-            "Un contenedor vacio transportado no es un viaje en vacio. "
-            "En SICE-TAC se registra como CARGADO, porque el contenedor es la carga.\n\n"
-            "Esa categoria se mantendra separada para no mezclarla con un vehiculo que retorna sin mercancia ni contenedor."
-        )
-        send_whatsapp_message(to=from_number, body=msg)
-        capture_lead_event(
-            {
-                "event": "container_empty_pending_request",
-                "ts": utcnow_iso(),
-                "channel": "whatsapp",
-                "lead": state["lead"],
-                "message": user_text,
-            }
-        )
-        return {"status": "container empty pending"}
 
     if usuario_pide_viaje_redondo(user_text) and not usuario_pide_viaje_redondo_con_vacio(user_text):
         msg = (
@@ -3419,6 +3427,22 @@ async def receive_message(request: Request):
         vehiculo = vehiculo_detectado or (state.get("last_route") or {}).get("vehiculo") or get_preferred_vehicle(state)
         carroceria = carroceria_detectada or (state.get("last_route") or {}).get("carroceria") or get_preferred_body_type(state)
     modo_viaje = parsear_modo_viaje(user_text)
+    tipo_contenedor = "VACIO" if usuario_pide_contenedor_vacio(user_text) else None
+    if (
+        tipo_contenedor is None
+        and modo_viaje != "VACIO"
+        and normalizar_carroceria(carroceria) == "Portacontenedores"
+    ):
+        tipo_contenedor = state.get("preferred_container_type")
+    if tipo_contenedor == "VACIO":
+        if carroceria and normalizar_carroceria(carroceria) != "Portacontenedores":
+            send_whatsapp_message(
+                to=from_number,
+                body="El contenedor vacío se consulta únicamente con carrocería Portacontenedores.",
+            )
+            return {"status": "container empty incompatible body"}
+        carroceria = "Portacontenedores"
+        modo_viaje = "CARGADO"
     if modo_viaje is None and not ruta_en_mensaje_actual:
         modo_viaje = (state.get("last_route") or {}).get("modo_viaje")
     horas_personalizadas = parsear_horas_personalizadas(user_text)
@@ -3559,6 +3583,7 @@ async def receive_message(request: Request):
         vehiculo=vehiculo,
         carroceria=carroceria,
         modo_viaje=modo_viaje,
+        tipo_contenedor=tipo_contenedor,
         codigo_dane_origen=ruta.get("codigo_dane_origen"),
         codigo_dane_destino=ruta.get("codigo_dane_destino"),
         incluir_peajes=True,
@@ -3605,6 +3630,7 @@ async def receive_message(request: Request):
         "vehiculo": vehiculo or "C3S3",
         "carroceria": carroceria,
         "modo_viaje": resultado.get("modo_viaje") or modo_viaje,
+        "tipo_contenedor": resultado.get("tipo_contenedor") or tipo_contenedor,
         "route_id": extraer_id_sice_principal(resultado),
         "consulted_at": utcnow_iso(),
     }
@@ -3669,6 +3695,7 @@ async def receive_message(request: Request):
                 "sicetac_reference_total": total_referencia,
                 "sicetac_reference_bucket": total_bucket,
                 "market_plaza_attached": bool(mensaje_plaza),
+                "tipo_contenedor": tipo_contenedor,
             },
         }
     )
