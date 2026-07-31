@@ -1025,6 +1025,24 @@ def usuario_pide_viaje_redondo_con_vacio(texto: str) -> bool:
     return "VIAJE REDONDO CON VACIO" in normalizar_lookup_texto(texto)
 
 
+def parsear_ids_viaje_redondo(texto: str) -> tuple[str | None, str | None]:
+    texto_normalizado = normalizar_lookup_texto(texto)
+    ida = re.search(r"\b(?:IDA|SALIDA)\s*(?:ID\s*)?(\d+)\b", texto_normalizado)
+    regreso = re.search(r"\b(?:REGRESO|VUELTA|RETORNO)\s*(?:ID\s*)?(\d+)\b", texto_normalizado)
+    return (
+        ida.group(1) if ida else None,
+        regreso.group(1) if regreso else None,
+    )
+
+
+def ids_variantes_sicetac(tramo: dict | None) -> set[str]:
+    return {
+        str(item.get("RUTASID") or item.get("ID_SICE"))
+        for item in (tramo or {}).get("variantes") or []
+        if item.get("RUTASID") or item.get("ID_SICE")
+    }
+
+
 def usuario_pide_modo_plus(texto: str) -> bool:
     texto_normalizado = normalizar_texto_libre(texto)
     if re.search(r"(?:^|[,;:\s-])(?:modo\s+plus|consulta\s+plus)(?:$|[,;:\s-])", texto_normalizado, re.IGNORECASE):
@@ -1887,6 +1905,8 @@ def consultar_viaje_redondo_con_vacio(
     ruta: dict,
     vehiculo: str,
     carroceria: str,
+    rutasid_ida: str | None = None,
+    rutasid_regreso: str | None = None,
 ) -> dict:
     resultado = consultar_sicetac(
         origen=ruta["origen"],
@@ -1899,6 +1919,8 @@ def consultar_viaje_redondo_con_vacio(
         viaje_redondo=True,
         tipo_contenedor="CARGADO",
         tipo_contenedor_regreso="VACIO",
+        rutasid_ida=rutasid_ida,
+        rutasid_regreso=rutasid_regreso,
     )
     if resultado is None:
         return {"_error": True, "_detail": "No fue posible consultar el viaje redondo."}
@@ -3207,6 +3229,49 @@ async def receive_message(request: Request):
             )
             return {"status": "preferred container type updated"}
 
+    seleccion_redondo = state.get("pending_round_trip_container")
+    if isinstance(seleccion_redondo, dict):
+        rutasid_ida, rutasid_regreso = parsear_ids_viaje_redondo(user_text)
+        ids_ida = set(seleccion_redondo.get("rutasid_ida") or [])
+        ids_regreso = set(seleccion_redondo.get("rutasid_regreso") or [])
+        if not rutasid_ida or not rutasid_regreso:
+            send_whatsapp_message(
+                to=from_number,
+                body="Para continuar escribe ambos IDs así: ida 106 regreso 11367.",
+            )
+            return {"status": "round trip route ids needed"}
+        if rutasid_ida not in ids_ida or rutasid_regreso not in ids_regreso:
+            send_whatsapp_message(
+                to=from_number,
+                body="Uno de los IDs no corresponde a las alternativas mostradas. Revisa los IDs de ida y regreso.",
+            )
+            return {"status": "round trip route ids invalid"}
+
+        resultado_redondo = consultar_viaje_redondo_con_vacio(
+            ruta=seleccion_redondo["ruta"],
+            vehiculo=seleccion_redondo["vehiculo"],
+            carroceria=seleccion_redondo["carroceria"],
+            rutasid_ida=rutasid_ida,
+            rutasid_regreso=rutasid_regreso,
+        )
+        respuesta_redondo = formatear_viaje_redondo_con_vacio(resultado_redondo)
+        send_whatsapp_message(to=from_number, body=respuesta_redondo)
+        if resultado_redondo.get("_error") or resultado_redondo.get("requiere_seleccion_ruta"):
+            return {"status": "round trip container empty unavailable"}
+        state.pop("pending_round_trip_container", None)
+        state["last_round_trip_result"] = resultado_redondo
+        capture_lead_event(
+            {
+                "event": "route_consulted_round_trip_container_empty",
+                "ts": utcnow_iso(),
+                "channel": "whatsapp",
+                "lead": state["lead"],
+                "route": seleccion_redondo["ruta"],
+                "selected_routes": {"ida": rutasid_ida, "regreso": rutasid_regreso},
+            }
+        )
+        return {"status": "ok", "mode": "round_trip_container_empty"}
+
     texto_lower = user_text.lower().strip()
     if es_saludo_o_ayuda_simple(user_text) and not parsear_ruta(user_text):
         send_whatsapp_message(to=from_number, body=mensaje_ayuda())
@@ -3493,6 +3558,17 @@ async def receive_message(request: Request):
             }
 
         ida_redondo = resultado_redondo.get("ida") or {}
+        regreso_redondo = resultado_redondo.get("regreso") or {}
+        if resultado_redondo.get("requiere_seleccion_ruta"):
+            state["pending_round_trip_container"] = {
+                "ruta": ruta,
+                "vehiculo": vehiculo or DEFAULT_VEHICULO,
+                "carroceria": carroceria or DEFAULT_CARROCERIA,
+                "rutasid_ida": sorted(ids_variantes_sicetac(ida_redondo)),
+                "rutasid_regreso": sorted(ids_variantes_sicetac(regreso_redondo)),
+            }
+        else:
+            state.pop("pending_round_trip_container", None)
         state["last_route"] = {
             "origen": ruta["origen"],
             "destino": ruta["destino"],
@@ -3516,17 +3592,8 @@ async def receive_message(request: Request):
                 "message": user_text,
                 "parse": analisis_busqueda,
                 "sicetac_round_trip": {
-                    "pairs_count": len(resultado_redondo.get("pares") or []),
-                    "unpaired_outbound": len(resultado_redondo.get("ida_sin_pareja") or []),
-                    "unpaired_return": len(resultado_redondo.get("regreso_sin_pareja") or []),
-                    "pairs": [
-                        {
-                            "outbound_id": (par.get("ida") or {}).get("ID_SICE"),
-                            "return_id": (par.get("regreso") or {}).get("ID_SICE"),
-                            "round_trip_total": par.get("total_viaje"),
-                        }
-                        for par in (resultado_redondo.get("pares") or [])
-                    ],
+                    "selection_required": bool(resultado_redondo.get("requiere_seleccion_ruta")),
+                    "totales": resultado_redondo.get("totales"),
                 },
             }
         )

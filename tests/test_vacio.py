@@ -67,6 +67,16 @@ class VacioFlowTests(unittest.TestCase):
         )
         self.assertEqual(main.recortar_destino("Bogotá viaje redondo con vacío"), "Bogotá")
 
+    def test_parses_selected_route_ids_for_round_trip(self) -> None:
+        self.assertEqual(
+            main.parsear_ids_viaje_redondo("ida 106 regreso 11367"),
+            ("106", "11367"),
+        )
+        self.assertEqual(
+            main.parsear_ids_viaje_redondo("salida id 106 vuelta id 11367"),
+            ("106", "11367"),
+        )
+
     @patch("main.requests.post")
     def test_sends_empty_container_as_loaded_to_api(self, post) -> None:
         response = Mock(status_code=200)
@@ -123,6 +133,8 @@ class VacioFlowTests(unittest.TestCase):
             },
             vehiculo="C2S2",
             carroceria="Portacontenedores",
+            rutasid_ida="154",
+            rutasid_regreso="95",
         )
 
         self.assertEqual(resultado, resultado_api)
@@ -131,6 +143,8 @@ class VacioFlowTests(unittest.TestCase):
         self.assertEqual(kwargs["tipo_contenedor"], "CARGADO")
         self.assertTrue(kwargs["viaje_redondo"])
         self.assertEqual(kwargs["tipo_contenedor_regreso"], "VACIO")
+        self.assertEqual(kwargs["rutasid_ida"], "154")
+        self.assertEqual(kwargs["rutasid_regreso"], "95")
         self.assertNotIn("peajes", kwargs)
 
         message = main.formatear_viaje_redondo_con_vacio(resultado)
