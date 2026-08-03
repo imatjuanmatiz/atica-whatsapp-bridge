@@ -1,5 +1,5 @@
 """
-ATICA WhatsApp Bridge v3.7.1
+ATICA WhatsApp Bridge v3.7.2
 Conecta WhatsApp Cloud API con la API SICETAC y, de forma opcional,
 con modelos externos para extraer mejor la ruta cuando el parser por codigo
 no logra cerrarla.
@@ -19,7 +19,7 @@ import requests
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("atica-whatsapp")
 
-app = FastAPI(title="ATICA WhatsApp Bridge", version="3.7.1")
+app = FastAPI(title="ATICA WhatsApp Bridge", version="3.7.2")
 
 
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "aticatoken123")
@@ -1056,6 +1056,47 @@ def usuario_pide_modo_plus(texto: str) -> bool:
     return any(trigger in texto_normalizado for trigger in triggers)
 
 
+def usuario_pide_modo_aumento(texto: str) -> bool:
+    texto_normalizado = normalizar_texto_libre(texto)
+    return bool(
+        re.search(r"(?:^|[,;:\s-])MODO\s+AUMENTO(?:$|[,;:\s-])", texto_normalizado)
+        or re.search(r"(?:^|[,;:\s-])AUMENTO\s+SICETAC(?:$|[,;:\s-])", texto_normalizado)
+    )
+
+
+def usuario_desactiva_modo_aumento(texto: str) -> bool:
+    texto_normalizado = normalizar_texto_libre(texto)
+    return bool(
+        re.search(r"(?:^|[,;:\s-])MODO\s+AUMENTO\s+(?:OFF|APAGADO|INACTIVO|DESACTIVAR|DESACTIVADO)(?:$|[,;:\s-])", texto_normalizado)
+        or re.search(r"(?:^|[,;:\s-])DESACTIVA(?:R)?\s+(?:EL\s+)?MODO\s+AUMENTO(?:$|[,;:\s-])", texto_normalizado)
+    )
+
+
+def limpiar_modo_aumento_texto(texto: str | None) -> str:
+    cleaned = str(texto or "")
+    cleaned = re.sub(
+        r"(?:[,;:\s\-]+)?(?:modo\s+aumento\s+(?:off|apagado|inactivo|desactivar|desactivado)|modo\s+aumento|aumento\s+SICETAC)\b",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(r"\s+", " ", cleaned).strip(" ,.;:-")
+
+
+def mensaje_modo_aumento(activo: bool) -> str:
+    if activo:
+        return (
+            "Modo aumento activado. Desde ahora compararé H4 y H8 contra "
+            "diciembre de 2025 en tus consultas SICETAC.\n\n"
+            "Ahora escribe la ruta así: origen a destino.\n"
+            "Para desactivarlo escribe: modo aumento off."
+        )
+    return (
+        "Modo aumento desactivado. Las próximas consultas mostrarán solamente "
+        "los valores SICETAC normales."
+    )
+
+
 def limpiar_modo_plus_texto(texto: str | None) -> str:
     cleaned = str(texto or "")
     cleaned = re.sub(
@@ -1401,6 +1442,30 @@ def formatear_respuesta(data: dict, *, include_closing: bool = True) -> str:
                     detalle += f" ({cantidad} peajes)"
                 lineas.append(detalle)
 
+        aumento = data.get("aumento") or {}
+        if aumento.get("activo"):
+            lineas.append("")
+            lineas.append("Modo aumento activo (base: diciembre de 2025):")
+            if "variantes" in data:
+                for i, var in enumerate(ordenar_variantes_sicetac(data.get("variantes") or []), 1):
+                    var_aumento = var.get("aumento") or {}
+                    pct = var_aumento.get("aumento_pct") or {}
+                    if pct.get("H4") is not None or pct.get("H8") is not None:
+                        lineas.append(
+                            f"Ruta {i}: H4 {fmt_decimal(pct.get('H4')) or pct.get('H4')}% | "
+                            f"H8 {fmt_decimal(pct.get('H8')) or pct.get('H8')}%"
+                        )
+            else:
+                pct = aumento.get("aumento_pct") or {}
+                if pct.get("H4") is not None or pct.get("H8") is not None:
+                    lineas.append(
+                        f"Aumento H4: {fmt_decimal(pct.get('H4')) or pct.get('H4')}% | "
+                        f"Aumento H8: {fmt_decimal(pct.get('H8')) or pct.get('H8')}%"
+                    )
+                elif aumento.get("motivo"):
+                    lineas.append(f"No disponible: {quitar_tildes(aumento.get('motivo'))}")
+            lineas.append("Para salir del modo aumento escribe: modo aumento off.")
+
         if include_closing:
             lineas.append("")
             if data.get("peajes_resumen") or any((v.get("peajes_resumen") for v in data.get("variantes", []) if isinstance(v, dict))):
@@ -1626,6 +1691,7 @@ def get_state(phone: str) -> dict:
             "last_route": None,
             "last_result": None,
             "last_plus_result": None,
+            "modo_aumento": False,
             "preferred_vehicle": None,
             "preferred_body_type": None,
             "preferred_container_type": None,
@@ -1688,12 +1754,15 @@ def consultar_sicetac(
     tipo_contenedor_regreso: str | None = None,
     rutasid_ida: str | None = None,
     rutasid_regreso: str | None = None,
+    modo_aumento: bool = False,
 ) -> dict | None:
     payload = {
         "origen": origen,
         "destino": destino,
         "resumen": resumen,
     }
+    if modo_aumento:
+        payload["modo_aumento"] = True
     if vehiculo:
         payload["vehiculo"] = vehiculo
     if carroceria:
@@ -3123,6 +3192,22 @@ async def receive_message(request: Request):
         logger.error(f"Parse error: {e}")
         return {"status": "parse error", "detail": str(e)}
 
+    # El modo aumento pertenece a la conversación de cada teléfono. Se
+    # activa/desactiva con texto y se reenvía en cada consulta SICETAC.
+    modo_aumento_off = usuario_desactiva_modo_aumento(user_text)
+    modo_aumento_on = usuario_pide_modo_aumento(user_text) and not modo_aumento_off
+    if modo_aumento_off or modo_aumento_on:
+        state["modo_aumento"] = modo_aumento_on
+        texto_sin_modo = limpiar_modo_aumento_texto(user_text)
+        ruta_en_mensaje = parsear_ruta(texto_sin_modo) if texto_sin_modo else None
+        if not ruta_en_mensaje:
+            send_whatsapp_message(to=from_number, body=mensaje_modo_aumento(modo_aumento_on))
+            return {
+                "status": "modo aumento updated",
+                "modo_aumento": modo_aumento_on,
+            }
+        user_text = texto_sin_modo
+
     if user_text.startswith("config:"):
         if user_text == "config:vehicle_menu":
             state["pending_selection"] = "vehicle_group"
@@ -3657,6 +3742,7 @@ async def receive_message(request: Request):
         codigo_dane_origen=ruta.get("codigo_dane_origen"),
         codigo_dane_destino=ruta.get("codigo_dane_destino"),
         incluir_peajes=True,
+        modo_aumento=bool(state.get("modo_aumento")),
     )
 
     if resultado is None:
