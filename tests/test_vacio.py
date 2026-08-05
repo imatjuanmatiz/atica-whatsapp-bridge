@@ -7,6 +7,34 @@ import main
 
 
 class VacioFlowTests(unittest.TestCase):
+    def test_global_reset_commands_are_recognized(self) -> None:
+        self.assertTrue(main.usuario_pide_limpiar_procesos("limpiar procesos"))
+        self.assertTrue(main.usuario_pide_limpiar_procesos("reiniciar"))
+        self.assertFalse(main.usuario_pide_limpiar_procesos("ida 106 regreso 11367"))
+
+    def test_reset_clears_pending_round_trip_without_erasing_preferences(self) -> None:
+        state = {
+            "pending_selection": "container_type",
+            "pending_round_trip_container": {"rutasid_ida": ["106"]},
+            "last_route": {"origen": "Bogotá", "destino": "Medellín"},
+            "last_result": {"totales": {"H8": 100}},
+            "last_plus_result": {"rows": []},
+            "last_round_trip_result": {"totales": {"H8": 200}},
+            "preferred_vehicle": "C3S3",
+            "preferred_body_type": "Portacontenedores",
+        }
+
+        main.limpiar_procesos_estado(state)
+
+        self.assertIsNone(state["pending_selection"])
+        self.assertNotIn("pending_round_trip_container", state)
+        self.assertNotIn("last_route", state)
+        self.assertNotIn("last_result", state)
+        self.assertNotIn("last_plus_result", state)
+        self.assertNotIn("last_round_trip_result", state)
+        self.assertEqual(state["preferred_vehicle"], "C3S3")
+        self.assertEqual(state["preferred_body_type"], "Portacontenedores")
+
     def test_parses_vehicle_empty_trip_without_losing_body_type(self) -> None:
         text = "Bogotá a Buenaventura C2S2 vacío portacontenedores"
         self.assertEqual(main.parsear_modo_viaje(text), "VACIO")

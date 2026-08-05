@@ -57,12 +57,10 @@ LEAD_CAPTURE_AUTH_TOKEN = (os.environ.get("LEAD_CAPTURE_AUTH_TOKEN") or "").stri
 LEAD_CAPTURE_APIKEY = (os.environ.get("LEAD_CAPTURE_APIKEY") or LEAD_CAPTURE_AUTH_TOKEN).strip()
 
 VEHICULOS_VALIDOS = [
-    "C278",
-    "C289",
-    "C2910",
-    "C258",
-    "C28105",
     "CA",
+    "C257",
+    "C279",
+    "C2910",
     "C2M10",
     "C3",
     "C2S2",
@@ -76,7 +74,7 @@ VEHICULOS_VALIDOS = [
 VEHICLE_GROUPS = {
     "livianos": {
         "title": "Livianos",
-        "vehicles": ["C278", "C289", "C2910", "C258", "C28105", "CA"],
+        "vehicles": ["CA", "C257", "C279", "C2910"],
     },
     "carga": {
         "title": "Carga pesada",
@@ -91,9 +89,10 @@ VOLQUETA_VEHICLES = {"V2", "V3", "V4"}
 VOLQUETA_BODY_TYPE = "Granel Solido - Volco"
 PLUS_EXCLUDED_VEHICLES = VOLQUETA_VEHICLES
 VEHICULO_ALIASES_FALLBACK = {
-    "2_5_8": "C258",
-    "2_8_105": "C28105",
     "CA_35_5": "CA",
+    "2_5_7": "C257",
+    "2_7_9": "C279",
+    "2_9_105": "C2910",
     "2S2": "C2S2",
     "2S3": "C2S3",
     "3S2": "C3S2",
@@ -102,12 +101,10 @@ VEHICULO_ALIASES_FALLBACK = {
 DEFAULT_VEHICULO = "C3S3"
 DEFAULT_CARROCERIA = "General - Estacas"
 PEAJE_CONFIG_POR_VEHICULO = {
-    "C278": "2",
-    "C289": "2",
-    "C2910": "2",
-    "C258": "2",
-    "C28105": "2",
     "CA": "2",
+    "C257": "2",
+    "C279": "2",
+    "C2910": "2",
     "C2M10": "2",
     "C3": "3",
     "C2S2": "C2S2",
@@ -115,6 +112,8 @@ PEAJE_CONFIG_POR_VEHICULO = {
     "C3S2": "C3S2",
     "C3S3": "C3S3",
     "V2": "2",
+    "V3": "3",
+    "V4": "4",
 }
 
 MANUAL_MUNICIPIO_ALIASES = {
@@ -248,13 +247,11 @@ CARROCERIA_ALIASES = {
 CARROCERIAS_VALIDAS = BODY_TYPE_OPTIONS[:]
 
 VEHICULO_DESCRIPCIONES = {
-    "C278": "camion rigido de 2 ejes",
-    "C289": "camion rigido de 2 ejes de mayor capacidad",
-    "C2910": "camion rigido de 2 ejes de mayor tonelaje",
-    "C258": "camion de 2 ejes liviano PBV 5.000 a 8.000 kg",
-    "C28105": "camion de 2 ejes liviano PBV 8.000 a 10.500 kg",
-    "CA": "camioneta PBV 3.500 a 5.000 kg",
-    "C2M10": "configuracion para mula de 2 ejes motrices",
+    "CA": "camioneta PBV 3.500 a 5.000 kg (en transicion)",
+    "C257": "camion de 2 ejes liviano PBV 5.001 a 7.000 kg (en transicion)",
+    "C279": "camion de 2 ejes liviano PBV 7.001 a 9.000 kg (en transicion)",
+    "C2910": "camion de 2 ejes liviano PBV 9.001 a 10.500 kg",
+    "C2M10": "camion de 2 ejes PBV mayor a 10.500 kg",
     "C3": "camion rigido de 3 ejes",
     "C2S2": "tractocamion de 2 ejes con semirremolque de 2 ejes",
     "C2S3": "tractocamion de 2 ejes con semirremolque de 3 ejes",
@@ -1185,7 +1182,7 @@ GEMINI_ROUTE_JSON_SCHEMA = {
         "destino": {"type": ["string", "null"], "description": "Municipio o ciudad de destino."},
         "vehiculo": {
             "type": ["string", "null"],
-            "description": "Configuracion vehicular canonica. Usa una de: C278, C289, C2910, C258, C28105, CA, C2M10, C3, C2S2, C2S3, C3S2, C3S3, V2, V3 o V4.",
+            "description": "Configuracion vehicular canonica. Usa una de: CA, C257, C279, C2910, C2M10, C3, C2S2, C2S3, C3S2, C3S3, V2, V3 o V4.",
         },
         "carroceria": {
             "type": ["string", "null"],
@@ -1552,7 +1549,7 @@ def mensaje_opciones() -> str:
         "- Cali a Buenaventura portacontenedores\n"
         "- Bogota a Barranquilla C3S3 furgon refrigerado\n"
         "- Cartagena a Bogota C2S2 estacas\n"
-        "- Bogota a Cali C258\n"
+        "- Bogota a Cali C257\n"
         "- Bogota a Cali V4 volco\n"
         "- Cali a Buenaventura C2S2 portacontenedores con contenedor vacio\n"
         "- Buenaventura a Bogota C2S2 portacontenedores viaje redondo con vacío\n"
@@ -1697,6 +1694,38 @@ def get_state(phone: str) -> dict:
             "preferred_container_type": None,
             "pending_selection": None,
         },
+    )
+
+
+def usuario_pide_limpiar_procesos(texto: str | None) -> bool:
+    """Detecta comandos que deben cancelar cualquier flujo conversacional pendiente."""
+    normalized = normalizar_lookup_texto(texto)
+    return normalized in {
+        "LIMPIAR PROCESO",
+        "LIMPIAR PROCESOS",
+        "REINICIAR",
+        "NUEVO CALCULO",
+        "NUEVO CALCULO SICETAC",
+        "CANCELAR",
+        "SALIR",
+    }
+
+
+def limpiar_procesos_estado(state: dict) -> None:
+    """Limpia solo el contexto efímero de cálculo y conserva preferencias/contacto."""
+    state["pending_selection"] = None
+    state.pop("pending_round_trip_container", None)
+    for key in ("last_route", "last_result", "last_plus_result", "last_round_trip_result"):
+        state.pop(key, None)
+
+
+def mensaje_procesos_limpiados() -> str:
+    return (
+        "Listo, limpié el proceso anterior.\n\n"
+        "Se canceló la selección de rutas pendiente. Tu configuración guardada se conserva.\n\n"
+        "Para iniciar un nuevo cálculo escribe:\n"
+        "Origen a destino\n\n"
+        "Ejemplo: Bogotá a Medellín"
     )
 
 
@@ -3192,6 +3221,21 @@ async def receive_message(request: Request):
         logger.error(f"Parse error: {e}")
         return {"status": "parse error", "detail": str(e)}
 
+    # Estos comandos son globales: deben poder escapar incluso de una
+    # selección de rutas pendiente en un viaje redondo.
+    if usuario_pide_limpiar_procesos(user_text):
+        limpiar_procesos_estado(state)
+        send_whatsapp_message(to=from_number, body=mensaje_procesos_limpiados())
+        capture_lead_event(
+            {
+                "event": "processes_cleared",
+                "ts": utcnow_iso(),
+                "channel": "whatsapp",
+                "lead": state["lead"],
+            }
+        )
+        return {"status": "processes cleared"}
+
     # El modo aumento pertenece a la conversación de cada teléfono. Se
     # activa/desactiva con texto y se reenvía en cada consulta SICETAC.
     modo_aumento_off = usuario_desactiva_modo_aumento(user_text)
@@ -3317,6 +3361,40 @@ async def receive_message(request: Request):
             )
             return {"status": "preferred container type updated"}
 
+    texto_lower = user_text.lower().strip()
+    if es_saludo_o_ayuda_simple(user_text) and not parsear_ruta(user_text):
+        state.pop("pending_round_trip_container", None)
+        state["pending_selection"] = None
+        send_whatsapp_message(to=from_number, body=mensaje_ayuda())
+        if any(token in texto_lower for token in ("ayuda", "help", "menu", "menú")):
+            send_configuration_menu(from_number)
+        capture_lead_event(
+            {
+                "event": "help_requested",
+                "ts": utcnow_iso(),
+                "channel": "whatsapp",
+                "lead": state["lead"],
+            }
+        )
+        return {"status": "help sent"}
+
+    if texto_lower in ("opciones", "configuraciones", "vehiculos", "vehículos", "carrocerias", "carrocerias", "menu opciones") or usuario_quiere_cambiar_configuracion(user_text):
+        state.pop("pending_round_trip_container", None)
+        state["pending_selection"] = None
+        if usuario_quiere_cambiar_configuracion(user_text):
+            send_configuration_menu(from_number)
+        else:
+            send_whatsapp_message(to=from_number, body=mensaje_opciones())
+        capture_lead_event(
+            {
+                "event": "options_requested",
+                "ts": utcnow_iso(),
+                "channel": "whatsapp",
+                "lead": state["lead"],
+            }
+        )
+        return {"status": "options sent"}
+
     seleccion_redondo = state.get("pending_round_trip_container")
     if isinstance(seleccion_redondo, dict):
         rutasid_ida, rutasid_regreso = parsear_ids_viaje_redondo(user_text)
@@ -3359,36 +3437,6 @@ async def receive_message(request: Request):
             }
         )
         return {"status": "ok", "mode": "round_trip_container_empty"}
-
-    texto_lower = user_text.lower().strip()
-    if es_saludo_o_ayuda_simple(user_text) and not parsear_ruta(user_text):
-        send_whatsapp_message(to=from_number, body=mensaje_ayuda())
-        if any(token in texto_lower for token in ("ayuda", "help", "menu", "menú")):
-            send_configuration_menu(from_number)
-        capture_lead_event(
-            {
-                "event": "help_requested",
-                "ts": utcnow_iso(),
-                "channel": "whatsapp",
-                "lead": state["lead"],
-            }
-        )
-        return {"status": "help sent"}
-
-    if texto_lower in ("opciones", "configuraciones", "vehiculos", "vehículos", "carrocerias", "carrocerias", "menu opciones") or usuario_quiere_cambiar_configuracion(user_text):
-        if usuario_quiere_cambiar_configuracion(user_text):
-            send_configuration_menu(from_number)
-        else:
-            send_whatsapp_message(to=from_number, body=mensaje_opciones())
-        capture_lead_event(
-            {
-                "event": "options_requested",
-                "ts": utcnow_iso(),
-                "channel": "whatsapp",
-                "lead": state["lead"],
-            }
-        )
-        return {"status": "options sent"}
 
     if usuario_pide_detalle_peajes(user_text):
         respuesta_peajes = responder_detalle_peajes_desde_contexto(user_text, state)
