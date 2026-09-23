@@ -19,7 +19,7 @@ import requests
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("atica-whatsapp")
 
-app = FastAPI(title="ATICA WhatsApp Bridge", version="3.7.2")
+app = FastAPI(title="ATICA WhatsApp Bridge", version="3.8.0")
 
 
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "aticatoken123")
@@ -1323,6 +1323,11 @@ def calcular_total_para_horas(data: dict | None, horas: float) -> float | None:
     totales = extraer_totales(data)
     if not totales:
         return None
+    key = f"H{int(horas)}" if float(horas).is_integer() else "personalizada"
+    if totales.get(key) is not None:
+        return float(totales[key])
+    if (data or {}).get("metodo") == "modelo_completo":
+        return None
     valor_hora = calcular_valor_hora_desde_totales(totales)
     if valor_hora is None:
         return None
@@ -1384,7 +1389,11 @@ def formatear_respuesta(data: dict, *, include_closing: bool = True) -> str:
                 else "Modo: Cargado"
             ),
         ]
-        if tipo_contenedor == "VACIO":
+        if data.get("total_km") is not None:
+            lineas.append(f"Distancia: {fmt_decimal(data['total_km'])} km")
+        if data.get("estimado"):
+            lineas.append("VALOR ESTIMADO: recorrido urbano de 30 km en terreno ondulado; peajes $0.")
+        elif tipo_contenedor == "VACIO":
             lineas.append(
                 "Referencia oficial de contenedor vacio transportado presentada con H2, H4 y H8."
             )
@@ -1409,6 +1418,8 @@ def formatear_respuesta(data: dict, *, include_closing: bool = True) -> str:
                 if id_sice:
                     etiqueta += f" (ID {id_sice})"
                 lineas.append(etiqueta)
+                if var.get("total_km") is not None:
+                    lineas.append(f"Distancia: {fmt_decimal(var['total_km'])} km")
                 if tot.get("H2") is not None:
                     lineas.append(f"H2: {fmt_cop(tot.get('H2'))}")
                 if tot.get("H4") is not None:
@@ -1424,7 +1435,7 @@ def formatear_respuesta(data: dict, *, include_closing: bool = True) -> str:
                     lineas.append(detalle)
         else:
             totales = data.get("totales", {})
-            lineas.append("Valores SICETAC:")
+            lineas.append("Valores estimados:" if data.get("estimado") else "Valores SICETAC:")
             if totales.get("H2") is not None:
                 lineas.append(f"H2: {fmt_cop(totales.get('H2'))}")
             if totales.get("H4") is not None:
@@ -1467,6 +1478,7 @@ def formatear_respuesta(data: dict, *, include_closing: bool = True) -> str:
             lineas.append("")
             if data.get("peajes_resumen") or any((v.get("peajes_resumen") for v in data.get("variantes", []) if isinstance(v, dict))):
                 lineas.append("Si quieres el detalle de peajes, escribe: detalle peajes.")
+            lineas.append("Para calcular el modelo completo, escribe: detalle de costos o detalle de consumo.")
             lineas.append("Escribe otra ruta asi: origen a destino.")
             lineas.append("Si quieres ver mas opciones, escribe: opciones.")
             lineas.append("Si quieres cambiar configuracion, escribe: cambiar configuracion.")
@@ -1715,7 +1727,7 @@ def limpiar_procesos_estado(state: dict) -> None:
     """Limpia solo el contexto efímero de cálculo y conserva preferencias/contacto."""
     state["pending_selection"] = None
     state.pop("pending_round_trip_container", None)
-    for key in ("last_route", "last_result", "last_plus_result", "last_round_trip_result"):
+    for key in ("last_route", "last_result", "last_plus_result", "last_round_trip_result", "last_model_result"):
         state.pop(key, None)
 
 
@@ -1784,6 +1796,10 @@ def consultar_sicetac(
     rutasid_ida: str | None = None,
     rutasid_regreso: str | None = None,
     modo_aumento: bool = False,
+    mes: int | None = None,
+    rutasid: str | None = None,
+    detalle_costos: bool = False,
+    detalle_consumo: bool = False,
 ) -> dict | None:
     payload = {
         "origen": origen,
@@ -1819,6 +1835,13 @@ def consultar_sicetac(
         payload["rutasid_ida"] = rutasid_ida
     if rutasid_regreso:
         payload["rutasid_regreso"] = rutasid_regreso
+
+    if mes is not None:
+        payload["mes"] = mes
+    if rutasid:
+        payload["rutasid"] = str(rutasid)
+    if detalle_costos or detalle_consumo:
+        payload.update(resumen=False, detalle_costos=detalle_costos, detalle_consumo=detalle_consumo)
 
     url = f"{SICETAC_API_BASE}/consulta"
     logger.info(f"SICETAC [{url}] payload: {payload}")
@@ -2201,6 +2224,89 @@ def formatear_detalle_peajes(detalle: dict, *, origen: str | None = None, destin
     if len(filas) > 20:
         lineas.append(f"Hay {len(filas) - 20} peajes adicionales.")
     return "\n".join(lineas)
+
+
+def tipo_detalle_modelo(texto: str) -> str | None:
+    texto = normalizar_texto_libre(texto).replace("_", " ")
+    match = re.search(r"\bDETALLE\s+(?:DE\s+)?(COSTOS?|CONSUMOS?)\b", texto)
+    if not match:
+        return None
+    return "consumo" if match.group(1).startswith("CONSUMO") else "costos"
+
+
+def formatear_detalle_modelo(data: dict, tipo: str) -> str:
+    c = data["detalle_costos"]
+    lines = [f"Detalle de {tipo}: {quitar_tildes(data['origen'])} a {quitar_tildes(data['destino'])}",
+             f"{data['configuracion']} | {data['carroceria']} | {data['modo_viaje']}",
+             f"Distancia: {fmt_decimal(data['total_km'])} km | Periodo: {data['mes']}"]
+    if data.get("estimado"):
+        lines.append("VALOR ESTIMADO: 30 km en terreno ondulado; peajes $0.")
+    if tipo == "consumo":
+        for terreno, item in data["detalle_consumo"]["por_terreno"].items():
+            lines.append(f"{quitar_tildes(terreno).capitalize()}: {fmt_decimal(item['km'])} km | {item['gal']:.2f} gal | {fmt_cop(item['costo_combustible'])}")
+        lines.extend([f"Total galones: {c['total_galones']:.2f}", f"Combustible total: {fmt_cop(c['combustible'])}"])
+    else:
+        lines.extend([
+            f"Total galones: {c['total_galones']:.2f}",
+            f"Tiempo de recorrido: {fmt_decimal(c['horas_recorrido'])} h",
+            f"Tiempo logistico: {fmt_decimal(c['horas_logisticas'])} h | Total: {fmt_decimal(c['horas_totales'])} h",
+            f"Rotaciones calculadas al mes: {c['rotaciones_calculadas']:.4f}",
+            f"Costos fijos del viaje: {fmt_cop(c['costo_fijo'])}",
+            f"Costos variables: {fmt_cop(c['costos_variables'])}",
+            f"  Combustible: {fmt_cop(c['combustible'])}",
+            f"  Peajes: {fmt_cop(c['peajes'])}",
+            f"  Mantenimiento e insumos: {fmt_cop(c['mantenimiento'])}",
+            f"  Imprevistos: {fmt_cop(c['imprevistos'])}",
+            f"Otros costos: {fmt_cop(c['otros_costos'])}",
+            f"Total modelo: {fmt_cop(c['total_viaje'])}",
+            f"Costo fijo mensual vigente desde {c['mes_costo_fijo']}: {fmt_cop(c['costo_fijo_mensual'])}",
+        ])
+    lines.append("Calculado con el modelo completo para esta ruta y configuracion.")
+    return "\n".join(lines)
+
+
+def responder_detalle_modelo_desde_contexto(user_text: str, state: dict) -> str:
+    tipo = tipo_detalle_modelo(user_text)
+    cleaned = re.sub(r"(?i)\bdetalle[ _]+(?:de[ _]+)?(?:costos?|consumos?)\b[: ]*", "", user_text).strip()
+    ruta_nueva = parsear_ruta(cleaned) if cleaned else None
+    anterior = state.get("last_route") or {}
+    resultado_anterior = state.get("last_result") or {}
+    ruta = ruta_nueva or anterior
+    if not ruta.get("origen") or not ruta.get("destino"):
+        return "Primero escribeme la ruta y el vehiculo, por ejemplo: Bogota a Barranquilla C3S3. Luego pide detalle de costos o detalle de consumo."
+    vehiculo = parsear_vehiculo(user_text) or (anterior.get("vehiculo") if not ruta_nueva else None) or get_preferred_vehicle(state)
+    if vehiculo == "PLUS":
+        return "Indica el vehiculo para calcular el detalle, por ejemplo: detalle de costos C3S3."
+    carroceria = parsear_carroceria(user_text) or (anterior.get("carroceria") if not ruta_nueva else None) or get_preferred_body_type(state)
+    if vehiculo in VOLQUETA_VEHICLES:
+        carroceria = VOLQUETA_BODY_TYPE
+    horas = parsear_horas_personalizadas(user_text)
+    if horas is None:
+        horas = anterior.get("horas_logisticas", 4) if not ruta_nueva else 4
+    modo = parsear_modo_viaje(user_text) or (anterior.get("modo_viaje") if not ruta_nueva else None) or "CARGADO"
+    tipo_contenedor = (anterior.get("tipo_contenedor") if not ruta_nueva else None)
+    resultado = consultar_sicetac(
+        origen=ruta["origen"], destino=ruta["destino"], vehiculo=vehiculo,
+        carroceria=carroceria, modo_viaje=modo, horas_logisticas=horas,
+        codigo_dane_origen=ruta.get("codigo_dane_origen"), codigo_dane_destino=ruta.get("codigo_dane_destino"),
+        mes=(anterior.get("mes") or resultado_anterior.get("mes")) if not ruta_nueva else None,
+        rutasid=anterior.get("route_id") if not ruta_nueva else None,
+        tipo_contenedor=tipo_contenedor, resumen=False,
+        detalle_costos=tipo == "costos", detalle_consumo=tipo == "consumo",
+    )
+    if not resultado or resultado.get("_error") or "detalle_costos" not in resultado:
+        if resultado and resultado.get("_detail"):
+            return f"No pude calcular el detalle: {resultado['_detail']}"
+        return "No pude calcular el detalle en este momento. Intenta nuevamente."
+    # Keep the published quotation intact; store the model separately.
+    state["last_model_result"] = resultado
+    state["last_plus_result"] = None
+    state["last_route"] = {"origen": resultado['origen'], "destino": resultado['destino'],
+        "vehiculo": resultado['configuracion'], "carroceria": resultado['carroceria'],
+        "modo_viaje": resultado['modo_viaje'], "tipo_contenedor": tipo_contenedor,
+        "mes": resultado['mes'], "horas_logisticas": horas, "route_id": resultado.get("rutasid"),
+        "codigo_dane_origen": ruta.get("codigo_dane_origen"), "codigo_dane_destino": ruta.get("codigo_dane_destino")}
+    return formatear_detalle_modelo(resultado, tipo)
 
 
 def responder_detalle_peajes_desde_contexto(user_text: str, state: dict) -> str:
@@ -3438,6 +3544,11 @@ async def receive_message(request: Request):
         )
         return {"status": "ok", "mode": "round_trip_container_empty"}
 
+    if tipo_detalle_modelo(user_text):
+        respuesta_detalle = responder_detalle_modelo_desde_contexto(user_text, state)
+        send_whatsapp_message(to=from_number, body=respuesta_detalle)
+        return {"status": "model detail sent"}
+
     if usuario_pide_detalle_peajes(user_text):
         respuesta_peajes = responder_detalle_peajes_desde_contexto(user_text, state)
         send_whatsapp_message(to=from_number, body=respuesta_peajes)
@@ -3649,6 +3760,8 @@ async def receive_message(request: Request):
     horas_personalizadas = parsear_horas_personalizadas(user_text)
     if horas_personalizadas is None:
         horas_personalizadas = ai_extraction.get("horas")
+    if horas_personalizadas is None and not ruta_en_mensaje_actual:
+        horas_personalizadas = (state.get("last_route") or {}).get("horas_logisticas")
     toneladas_explicitas = parsear_toneladas(user_text)
     if toneladas_explicitas is None:
         toneladas_explicitas = ai_extraction.get("toneladas")
@@ -3791,6 +3904,7 @@ async def receive_message(request: Request):
         codigo_dane_destino=ruta.get("codigo_dane_destino"),
         incluir_peajes=True,
         modo_aumento=bool(state.get("modo_aumento")),
+        horas_logisticas=horas_personalizadas,
     )
 
     if resultado is None:
@@ -3819,7 +3933,7 @@ async def receive_message(request: Request):
         send_whatsapp_message(to=from_number, body=fallback_reply)
         return {"status": "sicetac body error", "detail": resultado.get("error")}
 
-    if modo_viaje == "VACIO" and resultado.get("metodo") != "lookup_vacio_oficial":
+    if modo_viaje == "VACIO" and resultado.get("metodo") != "lookup_vacio_oficial" and not resultado.get("estimado"):
         msg = (
             f"No hay un valor oficial VACIO para {vehiculo or 'esta configuracion'} con "
             f"{quitar_tildes(carroceria or DEFAULT_CARROCERIA)}. "
@@ -3836,6 +3950,10 @@ async def receive_message(request: Request):
         "modo_viaje": resultado.get("modo_viaje") or modo_viaje,
         "tipo_contenedor": resultado.get("tipo_contenedor") or tipo_contenedor,
         "route_id": extraer_id_sice_principal(resultado),
+        "mes": resultado.get("mes"),
+        "horas_logisticas": horas_personalizadas if horas_personalizadas is not None else 4,
+        "codigo_dane_origen": ruta.get("codigo_dane_origen"),
+        "codigo_dane_destino": ruta.get("codigo_dane_destino"),
         "consulted_at": utcnow_iso(),
     }
     state["last_result"] = resultado
@@ -3870,6 +3988,11 @@ async def receive_message(request: Request):
             total_bucket = f"H{fmt_decimal(horas_personalizadas) or horas_personalizadas}"
     elif not ruta_en_mensaje_actual and (pide_horas or pide_valor_ton):
         respuesta = respuesta_deterministica
+    if query_kind != "route_summary":
+        if resultado.get("total_km") is not None:
+            respuesta += f"\nDistancia: {fmt_decimal(resultado['total_km'])} km"
+        if resultado.get("estimado"):
+            respuesta = "VALOR ESTIMADO: 30 km en terreno ondulado; peajes $0.\n" + respuesta
     send_whatsapp_message(to=from_number, body=respuesta)
 
     mensaje_plaza = None
