@@ -19,7 +19,7 @@ import requests
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("atica-whatsapp")
 
-app = FastAPI(title="ATICA WhatsApp Bridge", version="3.8.0")
+app = FastAPI(title="ATICA WhatsApp Bridge", version="3.8.1")
 
 
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "aticatoken123")
@@ -2241,6 +2241,10 @@ def formatear_detalle_modelo(data: dict, tipo: str) -> str:
              f"Distancia: {fmt_decimal(data['total_km'])} km | Periodo: {data['mes']}"]
     if data.get("estimado"):
         lines.append("VALOR ESTIMADO: 30 km en terreno ondulado; peajes $0.")
+    tradicional = data.get("sicetac_tradicional") or {}
+    if tradicional.get("total_viaje") is not None:
+        etiqueta = "Total SICETAC estimado" if tradicional.get("estimado") else "Total SICETAC"
+        lines.append(f"{etiqueta}: {fmt_cop(tradicional['total_viaje'])} ({fmt_decimal(tradicional['horas_logisticas'])} horas logisticas; periodo {tradicional['mes']})")
     if tipo == "consumo":
         for terreno, item in data["detalle_consumo"]["por_terreno"].items():
             lines.append(f"{quitar_tildes(terreno).capitalize()}: {fmt_decimal(item['km'])} km | {item['gal']:.2f} gal | {fmt_cop(item['costo_combustible'])}")

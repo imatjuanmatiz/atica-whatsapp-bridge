@@ -37,6 +37,22 @@ class CostDetailFlowTests(unittest.TestCase):
         self.assertIn('Ondulado: 30 km | 10.00 gal',answer)
         self.assertIn('Combustible total:',answer)
 
+    @patch.object(main,'ensure_vehiculos_cache')
+    @patch.object(main,'resolver_municipio_cache',side_effect=lambda text: {'nombre_oficial':text,'codigo_dane':'11001000' if text.lower()=='bogota' else '8001000'})
+    def test_direct_cost_and_consumption_include_traditional_total(self, municipalities, vehicles):
+        for kind in ('costos','consumo'):
+            for estimated in (False,True):
+                result=model()
+                result['sicetac_tradicional']={'total_viaje':7821531,'horas_logisticas':6,'mes':202609,'estimado':estimated}
+                with self.subTest(kind=kind,estimated=estimated), patch.object(main,'consultar_sicetac',return_value=result) as api:
+                    answer=main.responder_detalle_modelo_desde_contexto(f'detalle de {kind} Bogota a Barranquilla C3S3 6 horas',{})
+                self.assertEqual(main.normalizar_texto_libre(api.call_args.kwargs['origen']),'BOGOTA')
+                self.assertEqual(main.normalizar_texto_libre(api.call_args.kwargs['destino']),'BARRANQUILLA')
+                self.assertEqual(api.call_args.kwargs['horas_logisticas'],6)
+                self.assertIn('Total SICETAC estimado:' if estimated else 'Total SICETAC:',answer)
+                self.assertIn(main.fmt_cop(7821531),answer)
+                self.assertIn('6 horas logisticas',answer)
+
     def test_no_context_requires_route_without_api_call(self):
         with patch.object(main,'consultar_sicetac') as api:
             answer=main.responder_detalle_modelo_desde_contexto('detalle de costos',{})
