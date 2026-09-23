@@ -19,7 +19,7 @@ import requests
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("atica-whatsapp")
 
-app = FastAPI(title="ATICA WhatsApp Bridge", version="3.8.1")
+app = FastAPI(title="ATICA WhatsApp Bridge", version="3.8.2")
 
 
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "aticatoken123")
@@ -2262,10 +2262,9 @@ def formatear_detalle_modelo(data: dict, tipo: str) -> str:
             f"  Mantenimiento e insumos: {fmt_cop(c['mantenimiento'])}",
             f"  Imprevistos: {fmt_cop(c['imprevistos'])}",
             f"Otros costos: {fmt_cop(c['otros_costos'])}",
-            f"Total modelo: {fmt_cop(c['total_viaje'])}",
             f"Costo fijo mensual vigente desde {c['mes_costo_fijo']}: {fmt_cop(c['costo_fijo_mensual'])}",
         ])
-    lines.append("Calculado con el modelo completo para esta ruta y configuracion.")
+    lines.append("Desglose calculado con el modelo completo para esta ruta y configuracion.")
     return "\n".join(lines)
 
 

@@ -51,6 +51,9 @@ class CostDetailFlowTests(unittest.TestCase):
                 self.assertEqual(api.call_args.kwargs['horas_logisticas'],6)
                 self.assertIn('Total SICETAC estimado:' if estimated else 'Total SICETAC:',answer)
                 self.assertIn(main.fmt_cop(7821531),answer)
+                self.assertNotIn('Total modelo:',answer)
+                self.assertNotIn(main.fmt_cop(result['detalle_costos']['total_viaje']),answer)
+                self.assertEqual(answer.count('Total SICETAC'),1)
                 self.assertIn('6 horas logisticas',answer)
 
     def test_no_context_requires_route_without_api_call(self):
