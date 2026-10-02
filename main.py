@@ -19,12 +19,13 @@ import requests
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("atica-whatsapp")
 
-app = FastAPI(title="ATICA WhatsApp Bridge", version="3.8.2")
+app = FastAPI(title="ATICA WhatsApp Bridge", version="3.8.3")
 
 
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "aticatoken123")
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_ACCESS_TOKEN")
 WHATSAPP_PHONE_ID = os.environ.get("WHATSAPP_PHONE_ID")
+WHATSAPP_GRAPH_API_VERSION = (os.environ.get("WHATSAPP_GRAPH_API_VERSION") or "v25.0").strip()
 
 SICETAC_API_BASE = os.environ.get(
     "SICETAC_API_URL",
@@ -1675,6 +1676,33 @@ def mensaje_seleccion_carroceria() -> str:
     )
 
 
+def get_contact_for_message(value: dict, message: dict) -> dict:
+    """Find the profile matching this sender, tolerating phone-less BSUID webhooks."""
+    contacts = value.get("contacts") or []
+    message_phone = message.get("from")
+    message_user_id = message.get("from_user_id")
+    for contact in contacts:
+        if message_phone and contact.get("wa_id") == message_phone:
+            return contact
+        if message_user_id and contact.get("user_id") == message_user_id:
+            return contact
+    return contacts[0] if contacts else {}
+
+
+def resolve_whatsapp_recipient(message: dict, contact: dict | None = None) -> dict | None:
+    """Normalize Meta's phone and business-scoped user identifiers."""
+    contact = contact or {}
+    profile = contact.get("profile") or {}
+    recipient = {
+        "phone": message.get("from") or contact.get("wa_id"),
+        "user_id": message.get("from_user_id") or contact.get("user_id"),
+        "parent_user_id": message.get("from_parent_user_id") or contact.get("parent_user_id"),
+        "username": profile.get("username") or contact.get("username"),
+    }
+    recipient = {key: str(value).strip() for key, value in recipient.items() if value}
+    return recipient if recipient.get("phone") or recipient.get("user_id") else None
+
+
 def get_contact_name(value: dict) -> str | None:
     contacts = value.get("contacts") or []
     if not contacts:
@@ -1684,13 +1712,29 @@ def get_contact_name(value: dict) -> str | None:
     return name or None
 
 
-def get_state(phone: str) -> dict:
-    return CONVERSATION_STATE.setdefault(
-        phone,
+def get_state(
+    phone: str | None = None,
+    user_id: str | None = None,
+    parent_user_id: str | None = None,
+    username: str | None = None,
+) -> dict:
+    """Keep conversation state under the stable BSUID when Meta provides one."""
+    phone = (phone or "").strip() or None
+    user_id = (user_id or "").strip() or None
+    state_key = f"bsuid:{user_id}" if user_id else phone
+    if not state_key:
+        raise ValueError("WhatsApp sender has neither phone nor user_id")
+
+    # Preserve the existing phone-keyed flow when a sender starts arriving with a BSUID.
+    if user_id and phone and state_key not in CONVERSATION_STATE and phone in CONVERSATION_STATE:
+        CONVERSATION_STATE[state_key] = CONVERSATION_STATE.pop(phone)
+
+    state = CONVERSATION_STATE.setdefault(
+        state_key,
         {
             "previous_response_id": None,
             "lead": {
-                "phone": phone,
+                **({"phone": phone} if phone else {}),
                 "profile_name": None,
                 "name": None,
                 "company": None,
@@ -1707,6 +1751,16 @@ def get_state(phone: str) -> dict:
             "pending_selection": None,
         },
     )
+    lead = state.setdefault("lead", {})
+    if phone:
+        lead["phone"] = phone
+    if user_id:
+        lead["wa_user_id"] = user_id
+    if parent_user_id:
+        lead["wa_parent_user_id"] = parent_user_id
+    if username:
+        lead["wa_username"] = username
+    return state
 
 
 def usuario_pide_limpiar_procesos(texto: str | None) -> bool:
@@ -2617,6 +2671,11 @@ def capture_lead_event(payload: dict):
     if not LEAD_CAPTURE_WEBHOOK_URL:
         return
 
+    lead = payload.get("lead")
+    if isinstance(lead, dict) and not lead.get("phone") and not lead.get("wa_user_id"):
+        logger.warning("Lead capture skipped: sender has neither phone nor BSUID")
+        return
+
     headers = {"Content-Type": "application/json"}
     if CAPTURE_WEBHOOK_SECRET:
         headers["x-capture-secret"] = CAPTURE_WEBHOOK_SECRET
@@ -3039,32 +3098,56 @@ def extract_incoming_message(message: dict) -> tuple[str | None, str]:
     return None, message_type or "unknown"
 
 
-def send_whatsapp_payload(to: str, payload: dict):
+def build_whatsapp_send_payload(to: str | dict, payload: dict) -> dict | None:
+    """Build a Cloud API request addressed by phone, or by BSUID if no phone exists."""
+    if isinstance(to, dict):
+        phone = to.get("phone") or to.get("wa_id")
+        user_id = to.get("user_id") or to.get("wa_user_id")
+    else:
+        phone = to
+        user_id = None
+
+    full_payload = {"messaging_product": "whatsapp", **payload}
+    if phone:
+        full_payload["to"] = str(phone)
+    elif user_id:
+        full_payload["recipient_type"] = "individual"
+        full_payload["recipient"] = str(user_id)
+    else:
+        return None
+    return full_payload
+
+
+def send_whatsapp_payload(to: str | dict, payload: dict):
     if not WHATSAPP_TOKEN or not WHATSAPP_PHONE_ID:
         logger.warning("Missing WhatsApp credentials — skipping send")
-        return
+        return False
 
-    url = f"https://graph.facebook.com/v22.0/{WHATSAPP_PHONE_ID}/messages"
+    full_payload = build_whatsapp_send_payload(to, payload)
+    if full_payload is None:
+        logger.error("WA send skipped: recipient has no phone or BSUID")
+        return False
+
+    target = full_payload.get("to") or full_payload.get("recipient")
+    url = f"https://graph.facebook.com/{WHATSAPP_GRAPH_API_VERSION}/{WHATSAPP_PHONE_ID}/messages"
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
         "Content-Type": "application/json",
     }
-    full_payload = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        **payload,
-    }
 
     try:
         resp = requests.post(url, headers=headers, json=full_payload, timeout=30)
-        logger.info(f"WA send [{to}]: status={resp.status_code}, type={payload.get('type')}")
+        logger.info(f"WA send [{target}]: status={resp.status_code}, type={payload.get('type')}")
         if resp.status_code != 200:
-            logger.error(f"WA error: {resp.text}")
+            logger.error(f"WA error [{target}]: status={resp.status_code}, response={resp.text[:1000]}")
+            return False
+        return True
     except Exception as e:
-        logger.error(f"WA send error: {e}")
+        logger.error(f"WA send error [{target}]: {e}")
+        return False
 
 
-def send_whatsapp_message(to: str, body: str):
+def send_whatsapp_message(to: str | dict, body: str):
     send_whatsapp_payload(
         to,
         {
@@ -3077,7 +3160,7 @@ def send_whatsapp_message(to: str, body: str):
     )
 
 
-def send_whatsapp_buttons(to: str, body: str, buttons: list[dict], footer: str | None = None):
+def send_whatsapp_buttons(to: str | dict, body: str, buttons: list[dict], footer: str | None = None):
     action_buttons = []
     for button in buttons[:3]:
         action_buttons.append(
@@ -3109,7 +3192,7 @@ def send_whatsapp_buttons(to: str, body: str, buttons: list[dict], footer: str |
     )
 
 
-def send_whatsapp_list(to: str, body: str, button_text: str, sections: list[dict], footer: str | None = None):
+def send_whatsapp_list(to: str | dict, body: str, button_text: str, sections: list[dict], footer: str | None = None):
     interactive = {
         "type": "list",
         "body": {"text": body[:1024]},
@@ -3171,7 +3254,7 @@ def build_body_rows(group_key: str) -> list[dict]:
     return rows
 
 
-def send_configuration_menu(to: str):
+def send_configuration_menu(to: str | dict):
     send_whatsapp_buttons(
         to=to,
         body=mensaje_menu_configuracion(),
@@ -3184,7 +3267,7 @@ def send_configuration_menu(to: str):
     )
 
 
-def send_vehicle_group_selector(to: str):
+def send_vehicle_group_selector(to: str | dict):
     send_whatsapp_buttons(
         to=to,
         body="Elige el grupo de configuracion vehicular.",
@@ -3197,7 +3280,7 @@ def send_vehicle_group_selector(to: str):
     )
 
 
-def send_vehicle_selector(to: str, group_key: str):
+def send_vehicle_selector(to: str | dict, group_key: str):
     group = VEHICLE_GROUPS.get(group_key) or {}
     vehicles = group.get("vehicles") or []
     if not vehicles:
@@ -3217,7 +3300,7 @@ def send_vehicle_selector(to: str, group_key: str):
     )
 
 
-def send_body_group_selector(to: str):
+def send_body_group_selector(to: str | dict):
     send_whatsapp_buttons(
         to=to,
         body=mensaje_seleccion_carroceria(),
@@ -3230,7 +3313,7 @@ def send_body_group_selector(to: str):
     )
 
 
-def send_body_selector(to: str, group_key: str):
+def send_body_selector(to: str | dict, group_key: str):
     group = BODY_TYPE_GROUPS.get(group_key)
     if not group:
         send_whatsapp_message(to=to, body=mensaje_opciones())
@@ -3249,7 +3332,7 @@ def send_body_selector(to: str, group_key: str):
     )
 
 
-def send_container_type_selector(to: str):
+def send_container_type_selector(to: str | dict):
     send_whatsapp_buttons(
         to=to,
         body=(
@@ -3311,14 +3394,24 @@ async def receive_message(request: Request):
             return {"status": "no messages"}
 
         message = messages[0]
-        from_number = message["from"]
-        profile_name = get_contact_name(value)
-        state = get_state(from_number)
+        contact = get_contact_for_message(value, message)
+        recipient = resolve_whatsapp_recipient(message, contact)
+        if not recipient:
+            logger.warning("WhatsApp message has no from/wa_id or BSUID; cannot address a reply")
+            return {"status": "unsupported sender"}
+        from_number = recipient.get("phone") or recipient.get("user_id")
+        profile_name = ((contact.get("profile") or {}).get("name") or "").strip() or None
+        state = get_state(
+            phone=recipient.get("phone"),
+            user_id=recipient.get("user_id"),
+            parent_user_id=recipient.get("parent_user_id"),
+            username=recipient.get("username"),
+        )
         incoming_text, incoming_kind = extract_incoming_message(message)
 
         if not incoming_text:
             send_whatsapp_message(
-                to=from_number,
+                to=recipient,
                 body="Por ahora proceso texto, botones y listas. Escribe una ruta como: Bogota a Barranquilla",
             )
             return {"status": "non-text"}
@@ -3334,7 +3427,7 @@ async def receive_message(request: Request):
     # selección de rutas pendiente en un viaje redondo.
     if usuario_pide_limpiar_procesos(user_text):
         limpiar_procesos_estado(state)
-        send_whatsapp_message(to=from_number, body=mensaje_procesos_limpiados())
+        send_whatsapp_message(to=recipient, body=mensaje_procesos_limpiados())
         capture_lead_event(
             {
                 "event": "processes_cleared",
@@ -3354,7 +3447,7 @@ async def receive_message(request: Request):
         texto_sin_modo = limpiar_modo_aumento_texto(user_text)
         ruta_en_mensaje = parsear_ruta(texto_sin_modo) if texto_sin_modo else None
         if not ruta_en_mensaje:
-            send_whatsapp_message(to=from_number, body=mensaje_modo_aumento(modo_aumento_on))
+            send_whatsapp_message(to=recipient, body=mensaje_modo_aumento(modo_aumento_on))
             return {
                 "status": "modo aumento updated",
                 "modo_aumento": modo_aumento_on,
@@ -3364,26 +3457,26 @@ async def receive_message(request: Request):
     if user_text.startswith("config:"):
         if user_text == "config:vehicle_menu":
             state["pending_selection"] = "vehicle_group"
-            send_vehicle_group_selector(from_number)
+            send_vehicle_group_selector(recipient)
             return {"status": "vehicle group selector sent"}
         if user_text == "config:body_menu":
             state["pending_selection"] = "body_group"
-            send_body_group_selector(from_number)
+            send_body_group_selector(recipient)
             return {"status": "body group selector sent"}
         if user_text == "config:options_text":
-            send_whatsapp_message(to=from_number, body=mensaje_opciones())
+            send_whatsapp_message(to=recipient, body=mensaje_opciones())
             return {"status": "options sent"}
 
     if user_text.startswith("vehicle_group:"):
         group_key = user_text.split(":", 1)[1]
         state["pending_selection"] = f"vehicle:{group_key}"
-        send_vehicle_selector(from_number, group_key)
+        send_vehicle_selector(recipient, group_key)
         return {"status": "vehicle selector sent", "group": group_key}
 
     if user_text.startswith("body_group:"):
         group_key = user_text.split(":", 1)[1]
         state["pending_selection"] = f"body:{group_key}"
-        send_body_selector(from_number, group_key)
+        send_body_selector(recipient, group_key)
         return {"status": "body selector sent"}
 
     if user_text.startswith("vehicle:"):
@@ -3395,7 +3488,7 @@ async def receive_message(request: Request):
                 set_preferred_body_type(state, carroceria_requerida)
             state["pending_selection"] = None
             send_whatsapp_message(
-                to=from_number,
+                to=recipient,
                 body=mensaje_configuracion_guardada(
                     vehiculo=vehiculo_elegido,
                     carroceria=carroceria_requerida,
@@ -3419,12 +3512,12 @@ async def receive_message(request: Request):
             set_preferred_body_type(state, carroceria_normalizada)
             if carroceria_normalizada == "Portacontenedores":
                 state["pending_selection"] = "container_type"
-                send_container_type_selector(from_number)
+                send_container_type_selector(recipient)
                 return {"status": "container type selector sent"}
             state["preferred_container_type"] = None
             state["pending_selection"] = None
             send_whatsapp_message(
-                to=from_number,
+                to=recipient,
                 body=mensaje_configuracion_guardada(carroceria=carroceria_normalizada),
             )
             capture_lead_event(
@@ -3450,7 +3543,7 @@ async def receive_message(request: Request):
                 else "Portacontenedores con carga normal"
             )
             send_whatsapp_message(
-                to=from_number,
+                to=recipient,
                 body=(
                     f"Listo. Guardaré {detalle} para esta conversación.\n\n"
                     "Ahora escribe la ruta así: origen a destino."
@@ -3474,9 +3567,9 @@ async def receive_message(request: Request):
     if es_saludo_o_ayuda_simple(user_text) and not parsear_ruta(user_text):
         state.pop("pending_round_trip_container", None)
         state["pending_selection"] = None
-        send_whatsapp_message(to=from_number, body=mensaje_ayuda())
+        send_whatsapp_message(to=recipient, body=mensaje_ayuda())
         if any(token in texto_lower for token in ("ayuda", "help", "menu", "menú")):
-            send_configuration_menu(from_number)
+            send_configuration_menu(recipient)
         capture_lead_event(
             {
                 "event": "help_requested",
@@ -3491,9 +3584,9 @@ async def receive_message(request: Request):
         state.pop("pending_round_trip_container", None)
         state["pending_selection"] = None
         if usuario_quiere_cambiar_configuracion(user_text):
-            send_configuration_menu(from_number)
+            send_configuration_menu(recipient)
         else:
-            send_whatsapp_message(to=from_number, body=mensaje_opciones())
+            send_whatsapp_message(to=recipient, body=mensaje_opciones())
         capture_lead_event(
             {
                 "event": "options_requested",
@@ -3511,13 +3604,13 @@ async def receive_message(request: Request):
         ids_regreso = set(seleccion_redondo.get("rutasid_regreso") or [])
         if not rutasid_ida or not rutasid_regreso:
             send_whatsapp_message(
-                to=from_number,
+                to=recipient,
                 body="Para continuar escribe ambos IDs así: ida 106 regreso 11367.",
             )
             return {"status": "round trip route ids needed"}
         if rutasid_ida not in ids_ida or rutasid_regreso not in ids_regreso:
             send_whatsapp_message(
-                to=from_number,
+                to=recipient,
                 body="Uno de los IDs no corresponde a las alternativas mostradas. Revisa los IDs de ida y regreso.",
             )
             return {"status": "round trip route ids invalid"}
@@ -3530,7 +3623,7 @@ async def receive_message(request: Request):
             rutasid_regreso=rutasid_regreso,
         )
         respuesta_redondo = formatear_viaje_redondo_con_vacio(resultado_redondo)
-        send_whatsapp_message(to=from_number, body=respuesta_redondo)
+        send_whatsapp_message(to=recipient, body=respuesta_redondo)
         if resultado_redondo.get("_error") or resultado_redondo.get("requiere_seleccion_ruta"):
             return {"status": "round trip container empty unavailable"}
         state.pop("pending_round_trip_container", None)
@@ -3549,12 +3642,12 @@ async def receive_message(request: Request):
 
     if tipo_detalle_modelo(user_text):
         respuesta_detalle = responder_detalle_modelo_desde_contexto(user_text, state)
-        send_whatsapp_message(to=from_number, body=respuesta_detalle)
+        send_whatsapp_message(to=recipient, body=respuesta_detalle)
         return {"status": "model detail sent"}
 
     if usuario_pide_detalle_peajes(user_text):
         respuesta_peajes = responder_detalle_peajes_desde_contexto(user_text, state)
-        send_whatsapp_message(to=from_number, body=respuesta_peajes)
+        send_whatsapp_message(to=recipient, body=respuesta_peajes)
         capture_lead_event(
             {
                 "event": "toll_detail_requested",
@@ -3571,7 +3664,7 @@ async def receive_message(request: Request):
         vehiculo_preferido, _ = aplicar_preferencia_textual(user_text, state)
         if vehiculo_preferido and not state.get("last_route"):
             send_whatsapp_message(
-                to=from_number,
+                to=recipient,
                 body=mensaje_configuracion_guardada(vehiculo=vehiculo_preferido),
             )
             capture_lead_event(
@@ -3584,7 +3677,7 @@ async def receive_message(request: Request):
                 }
             )
             return {"status": "preferred vehicle updated from text"}
-        send_vehicle_selector(from_number)
+        send_vehicle_selector(recipient)
         capture_lead_event(
             {
                 "event": "options_requested",
@@ -3600,7 +3693,7 @@ async def receive_message(request: Request):
         _, carroceria_preferida = aplicar_preferencia_textual(user_text, state)
         if carroceria_preferida and not state.get("last_route"):
             send_whatsapp_message(
-                to=from_number,
+                to=recipient,
                 body=mensaje_configuracion_guardada(carroceria=carroceria_preferida),
             )
             capture_lead_event(
@@ -3614,9 +3707,9 @@ async def receive_message(request: Request):
             )
             return {"status": "preferred body updated from text"}
         if any(token in normalizar_lookup_texto(user_text) for token in ["GRANEL", "TANQUE", "VOLCO", "REFRIGERADO", "FRIO", "FRÍO"]):
-            send_body_group_selector(from_number)
+            send_body_group_selector(recipient)
             return {"status": "body group selector sent from text"}
-        send_body_group_selector(from_number)
+        send_body_group_selector(recipient)
         capture_lead_event(
             {
                 "event": "options_requested",
@@ -3634,7 +3727,7 @@ async def receive_message(request: Request):
             "viaje redondo con vacío.\n\n"
             "Ejemplo: Buenaventura a Bogota C2S2 portacontenedores viaje redondo con vacío."
         )
-        send_whatsapp_message(to=from_number, body=msg)
+        send_whatsapp_message(to=recipient, body=msg)
         return {"status": "round trip empty phrase requested"}
 
     analisis_busqueda = analizar_texto_busqueda(user_text)
@@ -3643,7 +3736,7 @@ async def receive_message(request: Request):
     ruta, ruta_en_mensaje_actual = resolver_contexto_consulta(analisis_busqueda.get("cleaned_text") or user_text, state)
     vehiculo_consultado = detectar_pregunta_configuracion(user_text)
     if vehiculo_consultado and not ruta:
-        send_whatsapp_message(to=from_number, body=mensaje_configuracion_vehiculo(vehiculo_consultado))
+        send_whatsapp_message(to=recipient, body=mensaje_configuracion_vehiculo(vehiculo_consultado))
         capture_lead_event(
             {
                 "event": "vehicle_info_requested",
@@ -3695,7 +3788,7 @@ async def receive_message(request: Request):
         if carroceria_textual:
             set_preferred_body_type(state, carroceria_textual)
         send_whatsapp_message(
-            to=from_number,
+            to=recipient,
             body=mensaje_configuracion_guardada(
                 vehiculo=vehiculo_textual,
                 carroceria=carroceria_textual,
@@ -3719,7 +3812,7 @@ async def receive_message(request: Request):
 
     if not ruta:
         fallback_reply = construir_respuesta_ruta_faltante(user_text, analisis_busqueda, state)
-        send_whatsapp_message(to=from_number, body=fallback_reply)
+        send_whatsapp_message(to=recipient, body=fallback_reply)
         capture_lead_event(
             {
                 "event": "message_without_route",
@@ -3752,7 +3845,7 @@ async def receive_message(request: Request):
     if tipo_contenedor == "VACIO":
         if carroceria and normalizar_carroceria(carroceria) != "Portacontenedores":
             send_whatsapp_message(
-                to=from_number,
+                to=recipient,
                 body="El contenedor vacío se consulta únicamente con carrocería Portacontenedores.",
             )
             return {"status": "container empty incompatible body"}
@@ -3785,7 +3878,7 @@ async def receive_message(request: Request):
     if vehiculo in VOLQUETA_VEHICLES:
         if carroceria_detectada and normalizar_carroceria(carroceria_detectada) != VOLQUETA_BODY_TYPE:
             send_whatsapp_message(
-                to=from_number,
+                to=recipient,
                 body=(
                     f"La configuracion {vehiculo} es una volqueta y en el catalogo actual se consulta con "
                     f"{quitar_tildes(VOLQUETA_BODY_TYPE)}. Escribe la ruta nuevamente usando volco."
@@ -3802,7 +3895,7 @@ async def receive_message(request: Request):
             carroceria=carroceria or DEFAULT_CARROCERIA,
         )
         respuesta_redondo = formatear_viaje_redondo_con_vacio(resultado_redondo)
-        send_whatsapp_message(to=from_number, body=respuesta_redondo)
+        send_whatsapp_message(to=recipient, body=respuesta_redondo)
         if resultado_redondo.get("_error"):
             return {
                 "status": "round trip empty unavailable",
@@ -3876,7 +3969,7 @@ async def receive_message(request: Request):
         }
         state["last_plus_result"] = resultado_plus
         state["last_result"] = None
-        send_whatsapp_message(to=from_number, body=formatear_modo_plus(resultado_plus))
+        send_whatsapp_message(to=recipient, body=formatear_modo_plus(resultado_plus))
         capture_lead_event(
             {
                 "event": "route_consulted_plus",
@@ -3912,7 +4005,7 @@ async def receive_message(request: Request):
 
     if resultado is None:
         fallback_reply = "No pude conectar con SICETAC en este momento. Intenta de nuevo en 1 minuto."
-        send_whatsapp_message(to=from_number, body=fallback_reply)
+        send_whatsapp_message(to=recipient, body=fallback_reply)
         return {"status": "sicetac timeout/error"}
 
     if resultado.get("_error"):
@@ -3928,12 +4021,12 @@ async def receive_message(request: Request):
             msg = f"Datos invalidos: {quitar_tildes(detail)}"
         else:
             msg = "Error en el servidor SICETAC. Intenta de nuevo en unos minutos."
-        send_whatsapp_message(to=from_number, body=msg)
+        send_whatsapp_message(to=recipient, body=msg)
         return {"status": "sicetac api error", "code": status, "detail": detail}
 
     if "error" in resultado and not resultado.get("totales") and not resultado.get("variantes"):
         fallback_reply = quitar_tildes(resultado.get("error", "Error desconocido"))
-        send_whatsapp_message(to=from_number, body=fallback_reply)
+        send_whatsapp_message(to=recipient, body=fallback_reply)
         return {"status": "sicetac body error", "detail": resultado.get("error")}
 
     if modo_viaje == "VACIO" and resultado.get("metodo") != "lookup_vacio_oficial" and not resultado.get("estimado"):
@@ -3942,7 +4035,7 @@ async def receive_message(request: Request):
             f"{quitar_tildes(carroceria or DEFAULT_CARROCERIA)}. "
             "Prueba una carroceria disponible para esa configuracion."
         )
-        send_whatsapp_message(to=from_number, body=msg)
+        send_whatsapp_message(to=recipient, body=msg)
         return {"status": "official empty value unavailable"}
 
     state["last_route"] = {
@@ -3996,13 +4089,13 @@ async def receive_message(request: Request):
             respuesta += f"\nDistancia: {fmt_decimal(resultado['total_km'])} km"
         if resultado.get("estimado"):
             respuesta = "VALOR ESTIMADO: 30 km en terreno ondulado; peajes $0.\n" + respuesta
-    send_whatsapp_message(to=from_number, body=respuesta)
+    send_whatsapp_message(to=recipient, body=respuesta)
 
     mensaje_plaza = None
     if ruta_en_mensaje_actual and query_kind == "route_summary":
         mensaje_plaza = formatear_valor_plaza(resultado)
         if mensaje_plaza:
-            send_whatsapp_message(to=from_number, body=mensaje_plaza)
+            send_whatsapp_message(to=recipient, body=mensaje_plaza)
 
     capture_lead_event(
         {
