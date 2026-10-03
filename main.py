@@ -1266,6 +1266,12 @@ def fmt_cop(valor) -> str:
         return str(valor)
 
 
+def fmt_cop_con_por_tonelada(valor, valor_por_tonelada) -> str:
+    if valor_por_tonelada in (None, ""):
+        return fmt_cop(valor)
+    return f"{fmt_cop(valor)} ({fmt_cop(valor_por_tonelada)}/tn)"
+
+
 def fmt_decimal(valor: float | int | None) -> str | None:
     if valor is None:
         return None
@@ -1415,6 +1421,7 @@ def formatear_respuesta(data: dict, *, include_closing: bool = True) -> str:
                 nombre = quitar_tildes(var.get("NOMBRE_SICE", f"Ruta {i}"))
                 id_sice = var.get("ID_SICE", "")
                 tot = var.get("totales", {})
+                totales_por_tonelada = var.get("totales_por_tonelada") or {}
                 etiqueta = f"{i}. {nombre}"
                 if id_sice:
                     etiqueta += f" (ID {id_sice})"
@@ -1422,11 +1429,11 @@ def formatear_respuesta(data: dict, *, include_closing: bool = True) -> str:
                 if var.get("total_km") is not None:
                     lineas.append(f"Distancia: {fmt_decimal(var['total_km'])} km")
                 if tot.get("H2") is not None:
-                    lineas.append(f"H2: {fmt_cop(tot.get('H2'))}")
+                    lineas.append(f"H2: {fmt_cop_con_por_tonelada(tot.get('H2'), totales_por_tonelada.get('H2'))}")
                 if tot.get("H4") is not None:
-                    lineas.append(f"H4: {fmt_cop(tot.get('H4'))}")
+                    lineas.append(f"H4: {fmt_cop_con_por_tonelada(tot.get('H4'), totales_por_tonelada.get('H4'))}")
                 if tot.get("H8") is not None:
-                    lineas.append(f"H8: {fmt_cop(tot.get('H8'))}")
+                    lineas.append(f"H8: {fmt_cop_con_por_tonelada(tot.get('H8'), totales_por_tonelada.get('H8'))}")
                 peajes_resumen = var.get("peajes_resumen") or {}
                 if peajes_resumen.get("total_peajes") is not None:
                     cantidad = peajes_resumen.get("cantidad_peajes")
@@ -1436,13 +1443,14 @@ def formatear_respuesta(data: dict, *, include_closing: bool = True) -> str:
                     lineas.append(detalle)
         else:
             totales = data.get("totales", {})
+            totales_por_tonelada = data.get("totales_por_tonelada") or {}
             lineas.append("Valores estimados:" if data.get("estimado") else "Valores SICETAC:")
             if totales.get("H2") is not None:
-                lineas.append(f"H2: {fmt_cop(totales.get('H2'))}")
+                lineas.append(f"H2: {fmt_cop_con_por_tonelada(totales.get('H2'), totales_por_tonelada.get('H2'))}")
             if totales.get("H4") is not None:
-                lineas.append(f"H4: {fmt_cop(totales.get('H4'))}")
+                lineas.append(f"H4: {fmt_cop_con_por_tonelada(totales.get('H4'), totales_por_tonelada.get('H4'))}")
             if totales.get("H8") is not None:
-                lineas.append(f"H8: {fmt_cop(totales.get('H8'))}")
+                lineas.append(f"H8: {fmt_cop_con_por_tonelada(totales.get('H8'), totales_por_tonelada.get('H8'))}")
             peajes_resumen = data.get("peajes_resumen") or {}
             if peajes_resumen.get("total_peajes") is not None:
                 cantidad = peajes_resumen.get("cantidad_peajes")
@@ -1499,13 +1507,19 @@ def formatear_valor_plaza(data: dict) -> str | None:
     tipo_carga = quitar_tildes(plaza.get("tipo_carga_label") or "Carga normal")
     promedio = plaza.get("promedio_ultimos_meses")
     lineas = [f"Valor en plaza RNDC ultimos {len(meses)} meses ({tipo_carga}):"]
-    for item in meses:
+    for index, item in enumerate(meses):
         mes_label = item.get("mes_label") or item.get("mes_codigo") or "Mes"
         valor = item.get("valor")
-        linea = f"- {mes_label}: {fmt_cop(valor)}"
+        por_tonelada = item.get("valor_por_tonelada")
+        if por_tonelada is None and index == 0:
+            por_tonelada = data.get("valor_plaza_por_tonelada")
+        linea = f"- {mes_label}: {fmt_cop_con_por_tonelada(valor, por_tonelada)}"
         lineas.append(linea)
     if promedio is not None:
-        lineas.append(f"Promedio: {fmt_cop(promedio)}")
+        promedio_por_tonelada = plaza.get("promedio_ultimos_meses_por_tonelada")
+        lineas.append(
+            f"Promedio: {fmt_cop_con_por_tonelada(promedio, promedio_por_tonelada)}"
+        )
     if plaza.get("fallback_to_carga_normal"):
         lineas.append("Nota: para esta carroceria no habia valor especifico y use carga normal.")
     lineas.append("Fuente: Calculos Atica - Atiemppo.")
@@ -2628,7 +2642,7 @@ def formatear_valor_por_tonelada(
         f"{configuracion_linea}\n"
         f"Referencia usada: {etiqueta_horas} = {fmt_cop(total)}\n"
         f"Toneladas: {toneladas_txt}\n"
-        f"Valor por tonelada: {fmt_cop(valor_ton)}\n\n"
+        f"Valor por tonelada: {fmt_cop(valor_ton)}/tn\n\n"
         "Escribe otra ruta asi: origen a destino."
     )
 
@@ -2661,7 +2675,7 @@ def formatear_valor_personalizado_por_horas(
         toneladas_base = toneladas if toneladas is not None else resolver_toneladas_configuracion(vehiculo)
         if toneladas_base:
             valor_ton = total / toneladas_base
-            lineas.append(f"Valor por tonelada: {fmt_cop(valor_ton)} usando {fmt_decimal(toneladas_base)} t")
+            lineas.append(f"Valor por tonelada: {fmt_cop(valor_ton)}/tn usando {fmt_decimal(toneladas_base)} t")
     lineas.append("")
     lineas.append("Escribe otra ruta asi: origen a destino.")
     return "\n".join(lineas)
