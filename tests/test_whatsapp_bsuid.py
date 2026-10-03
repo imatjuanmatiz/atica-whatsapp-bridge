@@ -1,6 +1,6 @@
 import asyncio
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import main
 
@@ -21,6 +21,80 @@ class WhatsAppBsuidTests(unittest.TestCase):
     def tearDown(self):
         main.CONVERSATION_STATE.clear()
         main.CONVERSATION_STATE.update(self.state_backup)
+
+    def test_extracts_provider_message_id_from_webhook(self):
+        body = {
+            "entry": [{
+                "changes": [{
+                    "value": {"messages": [{"id": "wamid.test-123"}]},
+                }],
+            }],
+        }
+
+        self.assertEqual(main.extract_whatsapp_message_id(body), "wamid.test-123")
+        self.assertIsNone(main.extract_whatsapp_message_id({"entry": []}))
+        self.assertIsNone(main.extract_whatsapp_message_id({"entry": ["invalid"]}))
+
+    def test_completed_duplicate_webhook_is_not_processed_again(self):
+        body = {
+            "entry": [{
+                "changes": [{
+                    "value": {"messages": [{"id": "wamid.test-123"}]},
+                }],
+            }],
+        }
+        process = AsyncMock()
+        with patch.object(main, "LEAD_CAPTURE_WEBHOOK_URL", "https://capture.invalid"), patch.object(
+            main,
+            "claim_whatsapp_message",
+            return_value={"ok": True, "claimed": False, "status": "completed"},
+        ), patch.object(main, "_process_whatsapp_payload", process):
+            result = asyncio.run(main.receive_message(FakeRequest(body)))
+
+        self.assertEqual(result, {"status": "duplicate"})
+        process.assert_not_awaited()
+
+    def test_concurrent_webhook_is_retried_without_parallel_processing(self):
+        body = {
+            "entry": [{
+                "changes": [{
+                    "value": {"messages": [{"id": "wamid.test-123"}]},
+                }],
+            }],
+        }
+        process = AsyncMock()
+        with patch.object(main, "LEAD_CAPTURE_WEBHOOK_URL", "https://capture.invalid"), patch.object(
+            main,
+            "claim_whatsapp_message",
+            return_value={"ok": True, "claimed": False, "status": "processing"},
+        ), patch.object(main, "_process_whatsapp_payload", process):
+            response = asyncio.run(main.receive_message(FakeRequest(body)))
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.headers["retry-after"], "10")
+        process.assert_not_awaited()
+
+    def test_first_webhook_claim_processes_and_finishes_once(self):
+        body = {
+            "entry": [{
+                "changes": [{
+                    "value": {"messages": [{"id": "wamid.test-123"}]},
+                }],
+            }],
+        }
+        process = AsyncMock(return_value={"status": "ok"})
+        with patch.object(main, "LEAD_CAPTURE_WEBHOOK_URL", "https://capture.invalid"), patch.object(
+            main,
+            "claim_whatsapp_message",
+            return_value={"ok": True, "claimed": True, "status": "processing"},
+        ), patch.object(main, "finish_whatsapp_message", return_value=True) as finish, patch.object(
+            main, "_process_whatsapp_payload", process
+        ):
+            result = asyncio.run(main.receive_message(FakeRequest(body)))
+
+        self.assertEqual(result, {"status": "ok"})
+        process.assert_awaited_once_with(body, "wamid.test-123")
+        finish.assert_called_once_with("wamid.test-123", success=True)
 
     def test_resolves_username_sender_without_phone(self):
         message = {
@@ -135,6 +209,7 @@ class WhatsAppBsuidTests(unittest.TestCase):
             "lead": {
                 "wa_user_id": "CO.bsuid-123",
                 "wa_username": "@dacardona18",
+                "wa_message_id": "wamid.test-123",
             },
         }
         with patch.object(main, "LEAD_CAPTURE_WEBHOOK_URL", "https://capture.invalid"):
@@ -144,6 +219,7 @@ class WhatsAppBsuidTests(unittest.TestCase):
         captured = post.call_args.kwargs["json"]["lead"]
         self.assertEqual(captured["wa_user_id"], "CO.bsuid-123")
         self.assertEqual(captured["wa_username"], "@dacardona18")
+        self.assertEqual(post.call_args.kwargs["json"]["wa_message_id"], "wamid.test-123")
         self.assertNotIn("phone", captured)
 
     @patch("main.requests.post")

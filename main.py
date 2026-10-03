@@ -13,6 +13,7 @@ import re
 import unicodedata
 
 from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse
 import requests
 
 
@@ -2681,6 +2682,17 @@ def formatear_valor_personalizado_por_horas(
     return "\n".join(lineas)
 
 
+def _lead_capture_headers() -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    if CAPTURE_WEBHOOK_SECRET:
+        headers["x-capture-secret"] = CAPTURE_WEBHOOK_SECRET
+    if LEAD_CAPTURE_AUTH_TOKEN:
+        headers["Authorization"] = f"Bearer {LEAD_CAPTURE_AUTH_TOKEN}"
+    if LEAD_CAPTURE_APIKEY:
+        headers["apikey"] = LEAD_CAPTURE_APIKEY
+    return headers
+
+
 def capture_lead_event(payload: dict):
     if not LEAD_CAPTURE_WEBHOOK_URL:
         return
@@ -2690,18 +2702,13 @@ def capture_lead_event(payload: dict):
         logger.warning("Lead capture skipped: sender has neither phone nor BSUID")
         return
 
-    headers = {"Content-Type": "application/json"}
-    if CAPTURE_WEBHOOK_SECRET:
-        headers["x-capture-secret"] = CAPTURE_WEBHOOK_SECRET
-    if LEAD_CAPTURE_AUTH_TOKEN:
-        headers["Authorization"] = f"Bearer {LEAD_CAPTURE_AUTH_TOKEN}"
-    if LEAD_CAPTURE_APIKEY:
-        headers["apikey"] = LEAD_CAPTURE_APIKEY
+    if not payload.get("wa_message_id") and isinstance(lead, dict):
+        payload["wa_message_id"] = lead.get("wa_message_id")
 
     try:
         requests.post(
             LEAD_CAPTURE_WEBHOOK_URL,
-            headers=headers,
+            headers=_lead_capture_headers(),
             json=payload,
             timeout=1.5,
         )
@@ -3394,10 +3401,76 @@ async def verify(request: Request):
     return {"status": "forbidden"}
 
 
-@app.post("/webhook")
-async def receive_message(request: Request):
-    data = await request.json()
+def extract_whatsapp_message_id(data: dict) -> str | None:
+    entries = data.get("entry") or []
+    if not isinstance(entries, list) or not entries or not isinstance(entries[0], dict):
+        return None
+    changes = entries[0].get("changes") or []
+    if not isinstance(changes, list) or not changes or not isinstance(changes[0], dict):
+        return None
+    value = changes[0].get("value") or {}
+    if not isinstance(value, dict):
+        return None
+    messages = value.get("messages") or []
+    if not isinstance(messages, list) or not messages or not isinstance(messages[0], dict):
+        return None
+    message_id = messages[0].get("id")
+    if message_id is None:
+        return None
+    return str(message_id).strip() or None
 
+
+def claim_whatsapp_message(wa_message_id: str) -> dict | None:
+    if not LEAD_CAPTURE_WEBHOOK_URL:
+        return {"ok": True, "claimed": True, "status": "dedup_disabled"}
+    try:
+        response = requests.post(
+            LEAD_CAPTURE_WEBHOOK_URL,
+            headers=_lead_capture_headers(),
+            json={"event": "claim_inbound_message", "wa_message_id": wa_message_id},
+            timeout=5,
+        )
+        if response.status_code >= 400:
+            logger.error("Inbound message claim failed: status=%s", response.status_code)
+            return None
+        body = response.json()
+        return body if isinstance(body, dict) and body.get("ok") else None
+    except Exception as e:
+        logger.warning("Inbound message claim unavailable: %s", e)
+        return None
+
+
+def finish_whatsapp_message(
+    wa_message_id: str,
+    *,
+    success: bool,
+    error: str | None = None,
+) -> bool:
+    if not LEAD_CAPTURE_WEBHOOK_URL:
+        return True
+    try:
+        response = requests.post(
+            LEAD_CAPTURE_WEBHOOK_URL,
+            headers=_lead_capture_headers(),
+            json={
+                "event": "finish_inbound_message",
+                "wa_message_id": wa_message_id,
+                "success": success,
+                "error": error,
+            },
+            timeout=5,
+        )
+        if response.status_code >= 400:
+            logger.error("Inbound message completion failed: status=%s", response.status_code)
+            return False
+        body = response.json()
+        return isinstance(body, dict) and bool(body.get("ok"))
+    except Exception as e:
+        logger.warning("Inbound message completion unavailable: %s", e)
+        return False
+
+
+async def _process_whatsapp_payload(data: dict, wa_message_id: str | None = None):
     try:
         entry = data["entry"][0]
         change = entry["changes"][0]
@@ -3421,6 +3494,8 @@ async def receive_message(request: Request):
             parent_user_id=recipient.get("parent_user_id"),
             username=recipient.get("username"),
         )
+        if wa_message_id:
+            state["lead"]["wa_message_id"] = wa_message_id
         incoming_text, incoming_kind = extract_incoming_message(message)
 
         if not incoming_text:
@@ -4139,3 +4214,52 @@ async def receive_message(request: Request):
 
     logger.info(f"OK [{from_number}]: {ruta['origen']} -> {ruta['destino']}")
     return {"status": "ok"}
+
+
+@app.post("/webhook")
+async def receive_message(request: Request):
+    data = await request.json()
+    wa_message_id = extract_whatsapp_message_id(data)
+    if not wa_message_id:
+        return await _process_whatsapp_payload(data)
+
+    claim = claim_whatsapp_message(wa_message_id)
+    if claim is None:
+        return JSONResponse(
+            status_code=503,
+            headers={"Retry-After": "10"},
+            content={"status": "deduplication_unavailable"},
+        )
+
+    if not claim.get("claimed"):
+        if claim.get("status") == "completed":
+            logger.info("Duplicate WhatsApp webhook acknowledged")
+            return {"status": "duplicate"}
+        return JSONResponse(
+            status_code=503,
+            headers={"Retry-After": "10"},
+            content={"status": "message_processing"},
+        )
+
+    try:
+        result = await _process_whatsapp_payload(data, wa_message_id)
+    except Exception as e:
+        finish_whatsapp_message(
+            wa_message_id,
+            success=False,
+            error=type(e).__name__,
+        )
+        logger.exception("Unhandled WhatsApp processing error")
+        return JSONResponse(
+            status_code=500,
+            headers={"Retry-After": "10"},
+            content={"status": "processing_failed"},
+        )
+
+    if not finish_whatsapp_message(wa_message_id, success=True):
+        return JSONResponse(
+            status_code=503,
+            headers={"Retry-After": "10"},
+            content={"status": "completion_unconfirmed"},
+        )
+    return result
