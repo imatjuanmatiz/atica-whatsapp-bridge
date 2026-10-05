@@ -15,12 +15,13 @@ import unicodedata
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 import requests
+from enterprise_rates import current_proof, set_proof, reset_proof, private_rates_message
 
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("atica-whatsapp")
 
-app = FastAPI(title="ATICA WhatsApp Bridge", version="3.8.3")
+app = FastAPI(title="ATICA WhatsApp Bridge", version="3.9.0")
 
 
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "aticatoken123")
@@ -4186,6 +4187,14 @@ async def _process_whatsapp_payload(data: dict, wa_message_id: str | None = None
         if mensaje_plaza:
             send_whatsapp_message(to=recipient, body=mensaje_plaza)
 
+    private_reply = private_rates_message(
+        proof=current_proof(), result=resultado, route=ruta,
+        vehicle=vehiculo or DEFAULT_VEHICULO, body=carroceria or DEFAULT_CARROCERIA,
+        travel_mode=modo_viaje,
+    )
+    if private_reply:
+        send_whatsapp_message(to=recipient, body=private_reply)
+
     capture_lead_event(
         {
             "event": "route_consulted",
@@ -4218,6 +4227,18 @@ async def _process_whatsapp_payload(data: dict, wa_message_id: str | None = None
 
 @app.post("/webhook")
 async def receive_message(request: Request):
+    token = None
+    signature = getattr(request, "headers", {}).get("x-hub-signature-256", "")
+    if signature:
+        token = set_proof(await request.body(), signature)
+    try:
+        return await _receive_message_with_dedup(request)
+    finally:
+        if token is not None:
+            reset_proof(token)
+
+
+async def _receive_message_with_dedup(request: Request):
     data = await request.json()
     wa_message_id = extract_whatsapp_message_id(data)
     if not wa_message_id:

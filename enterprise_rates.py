@@ -1,0 +1,62 @@
+"""Private tariff addon. Provider identity is verified by the portal, never by @ text."""
+import base64
+from contextvars import ContextVar
+import logging
+import os
+import requests
+
+logger = logging.getLogger("atica-enterprise")
+_proof = ContextVar("sicetac_webhook_proof", default=None)
+
+def set_proof(raw, signature):
+    return _proof.set({"webhook":base64.b64encode(raw).decode("ascii"),"signature":signature})
+
+def reset_proof(token):
+    _proof.reset(token)
+
+def current_proof():
+    return _proof.get()
+
+def private_rates_message(*, proof, result, route, vehicle, body, travel_mode):
+    url = os.environ.get("SICETAC_ENTERPRISE_URL", "").strip()
+    secret = os.environ.get("CAPTURE_WEBHOOK_SECRET", "").strip()
+    if not url or not secret or not proof or result.get("estimado"):
+        return None
+    variants = result.get("variantes") or [{"ID_SICE":(result.get("detalle_lookup") or {}).get("rutasid")}]
+    route_ids = list(dict.fromkeys(str(v.get("ID_SICE") or v.get("RUTASID") or "") for v in variants))
+    route_ids = [r for r in route_ids if r]
+    if not route_ids or len(route_ids)>30:
+        return None
+    queries = [{"origin":route.get("codigo_dane_origen") or route["origen"],"destination":route.get("codigo_dane_destino") or route["destino"],"vehicle":vehicle,"body":body,"travel_mode":travel_mode,"route_id":r} for r in route_ids]
+    try:
+        response = requests.post(url,headers={"x-capture-secret":secret,"Content-Type":"application/json"},json={**proof,"queries":queries},timeout=12)
+        if response.status_code != 200:
+            logger.warning("Private tariff query unavailable: status=%s",response.status_code)
+            return None
+        data=response.json()
+        if not data.get("authorized"):
+            return None
+        lines=[f"{data['company']['name']} · Tarifas privadas"]
+        available=False
+        for row in data.get("results",[]):
+            private=row.get("private") or {}
+            if not any(private.get(k) for k in ["carrier","customer"]):
+                continue
+            available=True
+            if any((private.get(k) or {}).get("is_simulated") for k in ["carrier","customer"]):
+                lines.append("SIMULACIÓN DE PRUEBA · No son pagos ni facturas reales")
+            lines.append(f"Ruta ID {row['route_id']} · {row['vehicle']}")
+            for kind,label in [("carrier","Pago al transportador"),("customer","Flete al cliente")]:
+                rate=private.get(kind)
+                if rate:
+                    amount=f"{float(rate['amount']):,.2f}".replace(",","_").replace(".",",").replace("_",".")
+                    lines.append(f"{label}: $ {amount} {rate['unit']}")
+                    lines.append(f"Vigencia: {rate['effective_from']} a {rate.get('effective_to') or 'sin fin definido'}")
+            margin=row.get("indicative_difference")
+            if margin:
+                amount=f"{float(margin['amount']):,.2f}".replace(",","_").replace(".",",").replace("_",".")
+                lines.append(f"Diferencia de tarifas: $ {amount} {margin['unit']} (no es margen contable)")
+        return "\n".join(lines)[:4096] if available else None
+    except (requests.RequestException,ValueError,KeyError,TypeError):
+        logger.warning("Private tariff query unavailable")
+        return None
