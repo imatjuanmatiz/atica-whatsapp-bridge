@@ -25,3 +25,15 @@ class EnterpriseTests(unittest.TestCase):
 
     def test_conversation_proof_does_not_survive_its_request(self):
         token=e.set_proof(b"fixture","signature");self.assertIsNotNone(e.current_proof());e.reset_proof(token);self.assertIsNone(e.current_proof())
+
+    def test_shipper_only_receives_negotiated_freight_even_if_legacy_payload_contains_carrier(self):
+        rate={"amount":1234567,"unit":"COP/viaje","effective_from":"2026-10-01"}
+        response=Mock(status_code=200);response.json.return_value={"authorized":True,"business_profile":"generadora","company":{"name":"QA"},"results":[{"route_id":"243","vehicle":"C3S3","private":{"carrier":rate,"customer":{**rate,"amount":2000000}},"indicative_difference":{"amount":765433,"unit":"COP/viaje"}}]}
+        with patch.dict(os.environ,{"SICETAC_ENTERPRISE_URL":"https://fixture.invalid","CAPTURE_WEBHOOK_SECRET":"fixture-secret"}),patch.object(e.requests,"post",return_value=response):
+            text=self.query();self.assertIn("Flete negociado",text);self.assertNotIn("1.234.567",text);self.assertNotIn("Diferencia de tarifas",text);self.assertNotIn("transportador",text)
+
+    def test_transport_profile_keeps_carrier_and_customer_labels(self):
+        rate={"amount":1234567,"unit":"COP/viaje","effective_from":"2026-10-01"}
+        response=Mock(status_code=200);response.json.return_value={"authorized":True,"company":{"name":"QA","business_profile":"transporte"},"results":[{"route_id":"243","vehicle":"C3S3","private":{"carrier":rate,"customer":rate}}]}
+        with patch.dict(os.environ,{"SICETAC_ENTERPRISE_URL":"https://fixture.invalid","CAPTURE_WEBHOOK_SECRET":"fixture-secret"}),patch.object(e.requests,"post",return_value=response):
+            text=self.query();self.assertIn("Valor a pagar al transportador",text);self.assertIn("Flete al cliente",text)

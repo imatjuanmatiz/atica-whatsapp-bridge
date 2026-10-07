@@ -21,7 +21,7 @@ from enterprise_rates import current_proof, set_proof, reset_proof, private_rate
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("atica-whatsapp")
 
-app = FastAPI(title="ATICA WhatsApp Bridge", version="3.9.0")
+app = FastAPI(title="ATICA WhatsApp Bridge", version="3.9.1")
 
 
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "aticatoken123")

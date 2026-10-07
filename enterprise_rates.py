@@ -37,23 +37,25 @@ def private_rates_message(*, proof, result, route, vehicle, body, travel_mode):
         if not data.get("authorized"):
             return None
         lines=[f"{data['company']['name']} · Tarifas privadas"]
+        profile=data.get("business_profile") or data["company"].get("business_profile")
+        kinds=[("customer","Flete negociado")] if profile=="generadora" else [("carrier","Valor a pagar al transportador"),("customer","Flete al cliente")]
         available=False
         for row in data.get("results",[]):
             private=row.get("private") or {}
-            if not any(private.get(k) for k in ["carrier","customer"]):
+            if not any(private.get(k) for k,_ in kinds):
                 continue
             available=True
-            if any((private.get(k) or {}).get("is_simulated") for k in ["carrier","customer"]):
+            if any((private.get(k) or {}).get("is_simulated") for k,_ in kinds):
                 lines.append("SIMULACIÓN DE PRUEBA · No son pagos ni facturas reales")
             lines.append(f"Ruta ID {row['route_id']} · {row['vehicle']}")
-            for kind,label in [("carrier","Pago al transportador"),("customer","Flete al cliente")]:
+            for kind,label in kinds:
                 rate=private.get(kind)
                 if rate:
                     amount=f"{float(rate['amount']):,.2f}".replace(",","_").replace(".",",").replace("_",".")
                     lines.append(f"{label}: $ {amount} {rate['unit']}")
                     lines.append(f"Vigencia: {rate['effective_from']} a {rate.get('effective_to') or 'sin fin definido'}")
             margin=row.get("indicative_difference")
-            if margin:
+            if margin and profile!="generadora":
                 amount=f"{float(margin['amount']):,.2f}".replace(",","_").replace(".",",").replace("_",".")
                 lines.append(f"Diferencia de tarifas: $ {amount} {margin['unit']} (no es margen contable)")
         return "\n".join(lines)[:4096] if available else None
