@@ -15,7 +15,7 @@ import unicodedata
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 import requests
-from enterprise_rates import current_proof, set_proof, reset_proof, private_rates_message
+from enterprise_rates import current_proof, set_proof, reset_proof, private_rates_message, link_command_message
 
 
 logging.basicConfig(level=logging.INFO)
@@ -3507,6 +3507,10 @@ async def _process_whatsapp_payload(data: dict, wa_message_id: str | None = None
             return {"status": "non-text"}
 
         user_text = incoming_text.strip()
+        linking_reply = link_command_message(text=user_text, proof=current_proof())
+        if linking_reply is not None:
+            send_whatsapp_message(to=recipient, body=linking_reply)
+            return {"status": "WhatsApp linking command handled"}
         merge_lead_data(state, profile_name, user_text)
         logger.info(f"MSG [{from_number}] ({incoming_kind}): {user_text}")
     except Exception as e:

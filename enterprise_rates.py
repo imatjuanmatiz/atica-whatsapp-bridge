@@ -3,6 +3,7 @@ import base64
 from contextvars import ContextVar
 import logging
 import os
+import re
 import requests
 
 logger = logging.getLogger("atica-enterprise")
@@ -16,6 +17,28 @@ def reset_proof(token):
 
 def current_proof():
     return _proof.get()
+
+def link_command_message(*, text, proof):
+    """A linking command never reaches route parsing, contact capture or LLMs."""
+    if not re.match(r"^VINCULAR(?:\s|$)", text.strip(), re.IGNORECASE):
+        return None
+    if not re.fullmatch(r"VINCULAR[ \t]+[A-Fa-f0-9]{32}", text.strip(), re.IGNORECASE):
+        return "Genera tu código en el portal: Mi empresa → Usuarios, o Preferencias → Conectar mi WhatsApp. Copia y envía el mensaje completo."
+    url=os.environ.get("SICETAC_ENTERPRISE_URL", "").strip().rstrip("/")
+    secret=os.environ.get("CAPTURE_WEBHOOK_SECRET", "").strip()
+    if not url or not secret or not proof:
+        return "No se pudo verificar la vinculación. Conserva tu código e inténtalo más tarde."
+    try:
+        response=requests.post(url+"/vincular",headers={"x-capture-secret":secret,"Content-Type":"application/json"},json=proof,timeout=12)
+        data=response.json()
+        if response.status_code==200 and data.get("linked"):
+            return f"WhatsApp vinculado a {data['company']}. Ya puedes consultar las rutas y tarifas autorizadas de tu empresa. Escribe, por ejemplo: Bogotá a Cali."
+        if response.status_code in (403,409,410):
+            return data.get("error") or "No se pudo vincular. Revisa tu acceso o genera un nuevo código en el portal."
+        logger.warning("WhatsApp linking unavailable: status=%s",response.status_code)
+    except (requests.RequestException,ValueError,KeyError,TypeError):
+        logger.warning("WhatsApp linking unavailable")
+    return "No se pudo completar la vinculación. Conserva tu código e inténtalo más tarde."
 
 def private_rates_message(*, proof, result, route, vehicle, body, travel_mode):
     url = os.environ.get("SICETAC_ENTERPRISE_URL", "").strip()
