@@ -1487,13 +1487,7 @@ def formatear_respuesta(data: dict, *, include_closing: bool = True) -> str:
 
         if include_closing:
             lineas.append("")
-            if data.get("peajes_resumen") or any((v.get("peajes_resumen") for v in data.get("variantes", []) if isinstance(v, dict))):
-                lineas.append("Si quieres el detalle de peajes, escribe: detalle peajes.")
-            lineas.append("Para calcular el modelo completo, escribe: detalle de costos o detalle de consumo.")
-            lineas.append("Escribe otra ruta asi: origen a destino.")
-            lineas.append("Si quieres ver mas opciones, escribe: opciones.")
-            lineas.append("Si quieres cambiar configuracion, escribe: cambiar configuracion.")
-            lineas.append("Para ver todos los comandos y ejemplos, escribe: ayuda.")
+            lineas.append("Escribe ayuda para ver más comandos.")
         return "\n".join(lineas)
     except Exception as e:
         logger.error(f"Error formateando: {e}")
