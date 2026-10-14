@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import requests
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 logger = logging.getLogger("atica-enterprise")
 _proof = ContextVar("sicetac_webhook_proof", default=None)
@@ -40,7 +41,71 @@ def link_command_message(*, text, proof):
         logger.warning("WhatsApp linking unavailable")
     return "No se pudo completar la vinculación. Conserva tu código e inténtalo más tarde."
 
-def private_rates_message(*, proof, result, route, vehicle, body, travel_mode):
+def _tonnage(value):
+    if isinstance(value, bool):
+        return None
+    try:
+        number = Decimal(str(value))
+        return number if number.is_finite() and number > 0 else None
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _money(value):
+    number = Decimal(str(value))
+    if not number.is_finite():
+        raise ValueError("Invalid monetary value")
+    return "$ " + f"{number.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP):,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
+
+
+def format_company_values(data, result, toneladas=None):
+    profile = data.get("business_profile") or data["company"].get("business_profile")
+    allowed = [("customer", "VF", "Valor Flete")] if profile == "generadora" else [
+        ("carrier", "VPT", "Valor pagado a transportador"), ("customer", "VF", "Valor Flete")]
+    rows = [row for row in data.get("results", []) if any((row.get("private") or {}).get(k) for k, _, _ in allowed)]
+    if not rows:
+        return None
+    legend = [f"{label} ({short})" for kind, short, label in allowed if any((row.get("private") or {}).get(kind) for row in rows)]
+    lines = [f"*Valores de empresa · {data['company']['name']}*", " · ".join(legend)]
+    if any(((row.get("private") or {}).get(k) or {}).get("is_simulated") for row in rows for k, _, _ in allowed):
+        lines.append("*SIMULACIÓN · Valores de prueba*")
+    for row in rows:
+        private = row.get("private") or {}
+        lines.append("")
+        if len(rows) > 1:
+            lines.append(f"Ruta ID {row['route_id']} · {row['vehicle']}")
+        variant = next((v for v in result.get("variantes", []) if str(v.get("ID_SICE") or v.get("RUTASID")) == str(row["route_id"])), {})
+        base = _tonnage(toneladas if toneladas is not None else variant.get("toneladas_configuracion", result.get("toneladas_configuracion")))
+        converted = False
+        dates = []
+        for kind, short, _ in allowed:
+            rate = private.get(kind)
+            if not rate:
+                continue
+            unit = rate["unit"]
+            text = f"*{short}:* {_money(rate['amount'])} {unit}"
+            if unit == "COP/viaje" and base is not None:
+                text += f" · {_money(Decimal(str(rate['amount'])) / base)}/tn"
+                converted = True
+            lines.append(text)
+            if rate.get("effective_from"):
+                dates.append((short, rate["effective_from"], rate.get("effective_to")))
+        if converted:
+            weight = format(base, "f").rstrip("0").rstrip(".") if "." in format(base, "f") else format(base, "f")
+            lines.append(f"Base por tonelada: {weight.replace('.', ',')} t" + (" de referencia" if toneladas is None else " indicadas"))
+        elif any((private.get(k) or {}).get("unit") == "COP/viaje" for k, _, _ in allowed):
+            lines.append("Por tonelada: sin base de peso disponible.")
+        if dates:
+            periods = {(start, end) for _, start, end in dates}
+            if len(periods) == 1:
+                start, end = next(iter(periods))
+                lines.append(f"Vigencia: {start}" + (f" a {end}" if end else " en adelante"))
+            else:
+                lines.append("Vigencia: " + " · ".join(f"{short} {start}" + (f" a {end}" if end else " en adelante") for short, start, end in dates))
+    return "\n".join(lines)[:4096]
+
+
+def private_rates_message(*, proof, result, route, vehicle, body, travel_mode, toneladas=None):
     url = os.environ.get("SICETAC_ENTERPRISE_URL", "").strip()
     secret = os.environ.get("CAPTURE_WEBHOOK_SECRET", "").strip()
     if not url or not secret or not proof or result.get("estimado"):
@@ -59,29 +124,7 @@ def private_rates_message(*, proof, result, route, vehicle, body, travel_mode):
         data=response.json()
         if not data.get("authorized"):
             return None
-        lines=[f"{data['company']['name']} · Tarifas privadas"]
-        profile=data.get("business_profile") or data["company"].get("business_profile")
-        kinds=[("customer","Flete negociado")] if profile=="generadora" else [("carrier","Valor a pagar al transportador"),("customer","Flete al cliente")]
-        available=False
-        for row in data.get("results",[]):
-            private=row.get("private") or {}
-            if not any(private.get(k) for k,_ in kinds):
-                continue
-            available=True
-            if any((private.get(k) or {}).get("is_simulated") for k,_ in kinds):
-                lines.append("SIMULACIÓN DE PRUEBA · No son pagos ni facturas reales")
-            lines.append(f"Ruta ID {row['route_id']} · {row['vehicle']}")
-            for kind,label in kinds:
-                rate=private.get(kind)
-                if rate:
-                    amount=f"{float(rate['amount']):,.2f}".replace(",","_").replace(".",",").replace("_",".")
-                    lines.append(f"{label}: $ {amount} {rate['unit']}")
-                    lines.append(f"Vigencia: {rate['effective_from']} a {rate.get('effective_to') or 'sin fin definido'}")
-            margin=row.get("indicative_difference")
-            if margin and profile!="generadora":
-                amount=f"{float(margin['amount']):,.2f}".replace(",","_").replace(".",",").replace("_",".")
-                lines.append(f"Diferencia de tarifas: $ {amount} {margin['unit']} (no es margen contable)")
-        return "\n".join(lines)[:4096] if available else None
-    except (requests.RequestException,ValueError,KeyError,TypeError):
+        return format_company_values(data, result, toneladas)
+    except (requests.RequestException,ValueError,KeyError,TypeError,InvalidOperation):
         logger.warning("Private tariff query unavailable")
         return None

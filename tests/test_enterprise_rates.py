@@ -30,10 +30,67 @@ class EnterpriseTests(unittest.TestCase):
         rate={"amount":1234567,"unit":"COP/viaje","effective_from":"2026-10-01"}
         response=Mock(status_code=200);response.json.return_value={"authorized":True,"business_profile":"generadora","company":{"name":"QA"},"results":[{"route_id":"243","vehicle":"C3S3","private":{"carrier":rate,"customer":{**rate,"amount":2000000}},"indicative_difference":{"amount":765433,"unit":"COP/viaje"}}]}
         with patch.dict(os.environ,{"SICETAC_ENTERPRISE_URL":"https://fixture.invalid","CAPTURE_WEBHOOK_SECRET":"fixture-secret"}),patch.object(e.requests,"post",return_value=response):
-            text=self.query();self.assertIn("Flete negociado",text);self.assertNotIn("1.234.567",text);self.assertNotIn("Diferencia de tarifas",text);self.assertNotIn("transportador",text)
+            text=self.query();self.assertIn("Valor Flete (VF)",text);self.assertNotIn("1.234.567",text);self.assertNotIn("Diferencia de tarifas",text);self.assertNotIn("transportador",text)
 
     def test_transport_profile_keeps_carrier_and_customer_labels(self):
         rate={"amount":1234567,"unit":"COP/viaje","effective_from":"2026-10-01"}
         response=Mock(status_code=200);response.json.return_value={"authorized":True,"company":{"name":"QA","business_profile":"transporte"},"results":[{"route_id":"243","vehicle":"C3S3","private":{"carrier":rate,"customer":rate}}]}
         with patch.dict(os.environ,{"SICETAC_ENTERPRISE_URL":"https://fixture.invalid","CAPTURE_WEBHOOK_SECRET":"fixture-secret"}),patch.object(e.requests,"post",return_value=response):
-            text=self.query();self.assertIn("Valor a pagar al transportador",text);self.assertIn("Flete al cliente",text)
+            text=self.query();self.assertIn("Valor pagado a transportador (VPT)",text);self.assertIn("Valor Flete (VF)",text)
+
+    def card(self, unit="COP/viaje", profile="transporte"):
+        rate={"amount":1700000,"unit":unit,"effective_from":"2026-10-01","effective_to":"2026-10-31"}
+        return {"company":{"name":"DEMO","business_profile":profile},"results":[{"route_id":"243","vehicle":"C3S3","private":{"carrier":rate,"customer":{**rate,"amount":3400000}},"indicative_difference":{"amount":1700000,"unit":unit}}]}
+
+    def test_reference_tons_and_compact_shared_validity(self):
+        text=e.format_company_values(self.card(),{"toneladas_configuracion":34})
+        self.assertIn("*VPT:* $ 1.700.000,00 COP/viaje · $ 50.000,00/tn",text)
+        self.assertIn("*VF:* $ 3.400.000,00 COP/viaje · $ 100.000,00/tn",text)
+        self.assertIn("34 t de referencia",text)
+        self.assertEqual(text.count("Vigencia:"),1)
+        self.assertNotIn("Diferencia",text)
+        self.assertNotIn("Ruta ID",text)
+
+    def test_explicit_tons_override_nominal(self):
+        text=e.format_company_values(self.card(),{"toneladas_configuracion":34},20)
+        self.assertIn("$ 85.000,00/tn",text)
+        self.assertIn("$ 170.000,00/tn",text)
+        self.assertIn("20 t indicadas",text)
+        self.assertNotIn("referencia",text)
+
+    def test_invalid_or_missing_tons_never_invent_a_conversion(self):
+        for weight in [None,0,-2,"NaN","Infinity",True,"unknown"]:
+            text=e.format_company_values(self.card(),{"toneladas_configuracion":weight})
+            self.assertNotIn("/tn",text)
+            self.assertIn("sin base de peso",text)
+        text=e.format_company_values(self.card(),{"toneladas_configuracion":34},0)
+        self.assertNotIn("/tn",text)
+
+    def test_already_per_ton_is_not_divided_again(self):
+        text=e.format_company_values(self.card(unit="COP/tn"),{"toneladas_configuracion":34})
+        self.assertIn("$ 1.700.000,00 COP/tn",text)
+        self.assertNotIn("$ 50.000,00",text)
+
+    def test_shipper_has_no_carrier_label_or_simulation_from_hidden_carrier(self):
+        data=self.card(profile="generadora")
+        data["results"][0]["private"]["carrier"]["is_simulated"]=True
+        text=e.format_company_values(data,{"toneladas_configuracion":34})
+        self.assertNotIn("VPT",text)
+        self.assertNotIn("SIMULACIÓN",text)
+        self.assertIn("*VF:*",text)
+
+    def test_variants_keep_identity_and_their_own_weight(self):
+        data=self.card()
+        data["results"].append({**data["results"][0],"route_id":"244"})
+        text=e.format_company_values(data,{"toneladas_configuracion":34,"variantes":[{"ID_SICE":"244","toneladas_configuracion":20}]})
+        self.assertIn("Ruta ID 243",text)
+        self.assertIn("Ruta ID 244",text)
+        self.assertIn("$ 50.000,00/tn",text)
+        self.assertIn("$ 85.000,00/tn",text)
+
+    def test_different_validities_are_not_collapsed(self):
+        data=self.card()
+        data["results"][0]["private"]["customer"]["effective_from"]="2026-10-10"
+        text=e.format_company_values(data,{"toneladas_configuracion":34})
+        self.assertIn("VPT 2026-10-01 a 2026-10-31",text)
+        self.assertIn("VF 2026-10-10 a 2026-10-31",text)

@@ -4189,6 +4189,7 @@ async def _process_whatsapp_payload(data: dict, wa_message_id: str | None = None
         proof=current_proof(), result=resultado, route=ruta,
         vehicle=vehiculo or DEFAULT_VEHICULO, body=carroceria or DEFAULT_CARROCERIA,
         travel_mode=modo_viaje,
+        toneladas=toneladas_explicitas,
     )
     if private_reply:
         send_whatsapp_message(to=recipient, body=private_reply)
