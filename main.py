@@ -22,7 +22,7 @@ import decisions_pilot
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("atica-whatsapp")
 
-app = FastAPI(title="ATICA WhatsApp Bridge", version="3.10.1")
+app = FastAPI(title="ATICA WhatsApp Bridge", version="3.10.2")
 
 
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "aticatoken123")
@@ -3470,6 +3470,14 @@ def finish_whatsapp_message(
         return False
 
 
+def respond_decisions_plan(plan,recipient):
+    return decisions_pilot.respond(
+        plan, query=consultar_sicetac, format_result=formatear_respuesta,
+        format_hours=formatear_valor_personalizado_por_horas, format_market=formatear_valor_plaza,
+        private_message=private_rates_message, proof=current_proof(),
+        send=send_whatsapp_message, recipient=recipient, send_buttons=send_whatsapp_buttons)
+
+
 async def _process_whatsapp_payload(data: dict, wa_message_id: str | None = None):
     try:
         entry = data["entry"][0]
@@ -3510,6 +3518,14 @@ async def _process_whatsapp_payload(data: dict, wa_message_id: str | None = None
         if linking_reply is not None:
             send_whatsapp_message(to=recipient, body=linking_reply)
             return {"status": "WhatsApp linking command handled"}
+        # The signed button contains a full public query. No conversation state,
+        # commercial capture or Decisions call is needed, even after a restart.
+        if user_text.startswith(decisions_pilot.ACTION_PREFIX):
+            action=decisions_pilot.decode_variant_action(user_text)
+            if action is None:
+                send_whatsapp_message(to=recipient,body="Este acceso a variantes ya no está disponible. Escribe de nuevo la ruta completa, vehículo y horas.")
+                return {"status":"invalid variants action"}
+            return respond_decisions_plan(action,recipient)
         merge_lead_data(state, profile_name, user_text)
         logger.info(f"MSG [{from_number}] ({incoming_kind}): {user_text}")
     except Exception as e:
@@ -3818,11 +3834,7 @@ async def _process_whatsapp_payload(data: dict, wa_message_id: str | None = None
     # Fallback, budget exhaustion and provider errors continue through legacy.
     decisions_plan = decisions_pilot.interpret(user_text, legacy_route_found=bool(parsear_ruta(user_text))) if decisions_pilot.configured() else None
     if decisions_plan is not None:
-        return decisions_pilot.respond(
-            decisions_plan, query=consultar_sicetac, format_result=formatear_respuesta,
-            format_hours=formatear_valor_personalizado_por_horas, format_market=formatear_valor_plaza,
-            private_message=private_rates_message, proof=current_proof(),
-            send=send_whatsapp_message, recipient=recipient)
+        return respond_decisions_plan(decisions_plan,recipient)
 
     if usuario_pide_viaje_redondo(user_text) and not usuario_pide_viaje_redondo_con_vacio(user_text):
         msg = (

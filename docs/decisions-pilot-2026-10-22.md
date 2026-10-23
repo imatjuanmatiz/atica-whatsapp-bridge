@@ -47,3 +47,39 @@ El control leído al activarlo registraba USD 0,0016837 en siete intentos sinté
 liquidados y cero pendientes. No se enviaron mensajes a contactos reales.
 Queda pendiente la comprobación humana de ida y vuelta en WhatsApp; la salud
 y los replays HTTP no la sustituyen. Este commit solo registra el recibo.
+
+
+## Principal primero y variantes bajo demanda · 3.10.2
+
+Juan aprobó mostrar solo la principal de cada tramo y ofrecer «Ver otras
+variantes». El puente respeta `seleccion_variante.rutasid_principal` publicado por
+el motor; no elige por precio o posición del arreglo. El motor actual documenta
+su criterio como menor RUTASID. Una variante explícita del usuario prevalece.
+Si la fuente no identifica una principal inequívoca, se presentan las opciones.
+
+El botón de cada sentido contiene su OD DANE, configuración resuelta,
+carrocería, modo, estado del contenedor, horas, periodo y peso declarado cuando
+aplica. Los parámetros públicos están firmados con HMAC-SHA256 de 96 bits y una
+etiqueta de dominio propia, usando la clave de canal ya configurada. No contiene
+cuentas, teléfonos, empresa, prueba de acceso ni secretos. La firma protege la
+integridad de parámetros; no concede autorización empresarial. Cada clic usa la
+prueba del webhook actual y conserva el control de acceso previo.
+
+El handler valida firma y parámetros antes de consultar, omite el clasificador y
+no escribe una última ruta ni captura comercial. Funciona con historial vacío o
+una ruta anterior distinta, y también con Decisions apagado mientras la clave
+siga configurada. La rotación de esa clave invalida botones anteriores de forma
+segura. No se agregó almacenamiento ni otra credencial.
+
+Solo la principal se usa también en el mensaje empresarial inicial. Al pulsar
+el botón se presentan las variantes de ese tramo. Las condiciones de contenedor
+vacío transportado y H6 no cambian entre ida y regreso; no se mezclan sus botones.
+No se cambiaron algoritmos, motor, presupuesto o permisos. El alcance de esta
+presentación es el flujo del piloto; el parser clásico conserva su flujo previo.
+
+Verificación: 72 pruebas del puente en modo sin red y envíos simulados. El replay
+con datos publicados confirmó las principales 154 / 95, los valores H6
+$3.217.526 / $2.676.872 y la expansión a cuatro variantes por sentido después de
+vaciar el estado local. Cero llamadas Decisions y cero envíos Meta en el replay.
+El recibo desplegado y el pendiente humano del botón se registran en el handoff
+central de Instant para evitar otro despliegue solo documental de este puente.

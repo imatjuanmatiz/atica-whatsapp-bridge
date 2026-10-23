@@ -1,4 +1,9 @@
 """Optional stateless interpreter for WhatsApp. No session or contact is sent."""
+import base64
+import hashlib
+import hmac
+import json
+import math
 import os
 import re
 
@@ -61,6 +66,68 @@ def interpret(text,*,legacy_route_found,post=requests.post):
     except (requests.RequestException,ValueError,TypeError,KeyError):return None
 
 
+ACTION_PREFIX='sii:variants:v1:'
+BODY_CODES={'E':'General - Estacas','F':'General - Furgon','P':'Portacontenedores'}
+
+
+def action_query(values):
+    """Fixed public-reference parameters, never identity or permissions."""
+    if not isinstance(values,list) or len(values)!=9:return None
+    origin,destination,vehicle,body,mode,container,hours,month,weight=values
+    if any(not isinstance(c,str) or not re.fullmatch(r'\d{8}',c) for c in (origin,destination)):return None
+    if not isinstance(vehicle,str) or not re.fullmatch(r'[A-Z0-9]{1,12}',vehicle):return None
+    if not isinstance(body,str) or body not in BODY_CODES or mode not in ('CARGADO','VACIO'):return None
+    if container not in (None,'CARGADO','VACIO'):return None
+    if body=='P' and (mode!='CARGADO' or container not in ('CARGADO','VACIO')):return None
+    if body!='P' and container is not None:return None
+    if type(hours) not in (int,float) or not math.isfinite(hours) or not 0<=hours<=48:return None
+    if mode=='VACIO' and hours!=0:return None
+    if type(month) is not int or not 200001<=month<=210012 or not 1<=month%100<=12:return None
+    if weight is not None and (type(weight) not in (int,float) or not math.isfinite(weight) or not 0<weight<=60):return None
+    if container=='VACIO' and weight is not None:return None
+    return dict(origen=origin,destino=destination,codigo_dane_origen=origin,codigo_dane_destino=destination,
+        vehiculo=vehicle,carroceria=BODY_CODES[body],modo_viaje=mode,tipo_contenedor=container,
+        horas_logisticas=hours,mes=month,peso_carga_t=weight)
+
+
+def variant_action(q,period):
+    key=os.getenv('SICETAC_INSTANT_DECISIONS_BRIDGE_KEY','')
+    body=next((k for k,v in BODY_CODES.items() if v==q.get('carroceria')),None)
+    container=q.get('tipo_contenedor')
+    if body=='P' and container is None:container='CARGADO'
+    values=[q.get('codigo_dane_origen'),q.get('codigo_dane_destino'),q.get('vehiculo'),body,
+        q.get('modo_viaje'),container,q.get('horas_logisticas'),period,q.get('peso_carga_t')]
+    if not key or action_query(values) is None:return None
+    payload=base64.urlsafe_b64encode(json.dumps(values,separators=(',',':'),allow_nan=False).encode()).decode().rstrip('=')
+    signature=hmac.new(key.encode(),(ACTION_PREFIX+payload).encode(),hashlib.sha256).hexdigest()[:24]
+    action=ACTION_PREFIX+payload+':'+signature
+    return action if len(action)<=256 else None
+
+
+def decode_variant_action(text):
+    key=os.getenv('SICETAC_INSTANT_DECISIONS_BRIDGE_KEY','')
+    if not key or not isinstance(text,str) or not text.startswith(ACTION_PREFIX) or len(text)>256:return None
+    try:
+        payload,signature=text[len(ACTION_PREFIX):].split(':')
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,220}',payload) or not re.fullmatch(r'[0-9a-f]{24}',signature):return None
+        expected=hmac.new(key.encode(),(ACTION_PREFIX+payload).encode(),hashlib.sha256).hexdigest()[:24]
+        if not hmac.compare_digest(signature,expected):return None
+        values=json.loads(base64.urlsafe_b64decode(payload+'='*(-len(payload)%4)))
+        q=action_query(values)
+        return {'status':'draft','queries':[q],'view_all_variants':True} if q else None
+    except (ValueError,TypeError):return None
+
+
+def selected_principal(result,q):
+    variants=result.get('variantes') or []
+    if len(variants)==1:return variants[0]
+    selection=result.get('seleccion_variante') or {}
+    rid=q.get('rutasid') or selection.get('rutasid_principal') or result.get('rutasid') or (result.get('detalle_lookup') or {}).get('rutasid')
+    if rid is None:return None
+    matches=[v for v in variants if str(v.get('ID_SICE') or v.get('RUTASID') or '')==str(rid)]
+    return matches[0] if len(matches)==1 else None
+
+
 def send_parts(send,recipient,text):
     # The existing sender truncates at 4096. Keep every variant without truncation.
     remaining=text
@@ -73,13 +140,14 @@ def send_parts(send,recipient,text):
         remaining=remaining[cut:]
 
 
-def reference_text(result,q,format_hours):
+def reference_text(result,q,format_hours,*,principal=None):
     parts=[f"Carrocería: {q['carroceria']}",f"Modo: {q['modo_viaje']}"]
     if q.get('tipo_contenedor'):parts.append(f"Contenedor: {q['tipo_contenedor']}")
     if result.get('mes'):parts.append(f"Periodo: {result['mes']}")
     if result.get('estimado'):parts.append('VALOR ESTIMADO: no es una referencia de ruta publicada.')
     variants=result.get('variantes') or []
-    rows=variants or [None]
+    rows=[principal] if principal is not None else (variants or [None])
+    if principal is not None and len(variants)>1:parts.append('Ruta seleccionada' if q.get('rutasid') else 'Ruta principal')
     if len(rows)>1:parts.append(f"Variantes disponibles: {len(rows)}; no se seleccionó una automáticamente.")
     for variant in rows:
         row={k:v for k,v in result.items() if k!='variantes'}
@@ -93,11 +161,11 @@ def reference_text(result,q,format_hours):
             parts.append(label)
         parts.append(format_hours(resultado=row,horas=q['horas_logisticas'],vehiculo=q['vehiculo'],
             toneladas=q.get('peso_carga_t'),incluir_por_tonelada=False,include_closing=False))
-    parts.append('Escribe otra consulta con la ruta completa, vehículo y horas.')
+    if principal is None:parts.append('Escribe otra consulta con la ruta completa, vehículo y horas.')
     return '\n'.join(parts)
 
 
-def respond(plan,*,query,format_result,format_hours,format_market,private_message,proof,send,recipient):
+def respond(plan,*,query,format_result,format_hours,format_market,private_message,proof,send,recipient,send_buttons=None):
     """All queries validated first. Execute each leg once; never save last_route."""
     if plan['status']=='clarify':
         send(to=recipient,body='Para consultar esta solicitud:\n'+'\n'.join(plan['questions']))
@@ -114,12 +182,26 @@ def respond(plan,*,query,format_result,format_hours,format_market,private_messag
         if q['modo_viaje']=='VACIO' and result.get('metodo')!='lookup_vacio_oficial' and not result.get('estimado'):
             send(to=recipient,body='No hay una referencia oficial de vehículo vacío para este tramo y carrocería.')
             return {'status':'decisions unavailable','completed_legs':index-1}
-        text=reference_text(result,q,format_hours)
+        principal=None;action=None
+        if not plan.get('view_all_variants'):
+            principal=selected_principal(result,q)
+            if principal is not None and len(result.get('variantes') or [])>1:
+                action=variant_action(q,result.get('mes')) if send_buttons is not None else None
+                if action is None:principal=None  # Preserve access to every alternative.
+        text=reference_text(result,q,format_hours,principal=principal)
         if len(plan['queries'])>1:text=f'Tramo {index}/{len(plan["queries"])}\n'+text
-        send_parts(send,recipient,text)
+        # Existing interactive sender accepts a 1024-character body.
+        if action and len(text)<=1024:
+            send_buttons(to=recipient,body=text,buttons=[{'id':action,'title':'Ver otras variantes'}])
+        else:
+            send_parts(send,recipient,text)
+            if action:send_buttons(to=recipient,body='Consulta otras variantes de este tramo.',buttons=[{'id':action,'title':'Ver otras variantes'}])
         market=format_market(result)
         if market:send(to=recipient,body=market)
-        private=private_message(proof=proof,result=result,route=q,vehicle=q['vehiculo'],body=q['carroceria'],
+        private_result=result
+        if principal is not None:
+            private_result={**result,'variantes':[principal],'totales':principal.get('totales',{})}
+        private=private_message(proof=proof,result=private_result,route=q,vehicle=q['vehiculo'],body=q['carroceria'],
             travel_mode=q['modo_viaje'],toneladas=q.get('peso_carga_t'))
         if private:send(to=recipient,body=private)
     return {'status':'ok','mode':'decisions-stateless','completed_legs':len(plan['queries'])}
