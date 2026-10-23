@@ -1,5 +1,26 @@
 # Piloto Decisions en la línea existente · 22-oct-2026
 
+## Publicado 3.10.4 · 23 oct 2026
+
+Código `d2189a067ab2711677e5e60385146a6ffdbc8e1f`, main remoto verificado.
+Render `dep-dbdjredbedkc73d31m30` live; salud `/` muestra 3.10.4, mismo motor
+y fallbacks previos suspendidos. Instant 0.4.16, código `7d2d481`, desplegado
+`dpl_7rjK5DZBaofsVbR4AL83cLeXPTir` y promovido después de probarlo.
+
+Una clasificación real confirmó ida y regreso C2S2 cargados H6 sin contexto.
+Replay con el motor público y handlers locales comprobó cuatro variantes por
+sentido y la alternativa de contenedor vacío conservando H6 ($2.676.872).
+Envíos WhatsApp simulados; sigue pendiente recepción y clic humano. No se
+cambiaron motor, secretos, Meta, SQL, permisos o tope USD 5. La llamada real
+usa el presupuesto vigente; su importe no se leyó en esta publicación.
+Handoff y recibos centrales en SICETAC-AL-INSTANTE:
+`docs/DECISIONS-TRAMOS-MISMA-CONFIGURACION-2026-10-23.md`.
+
+Esta nota documental se guarda en `codex/decisions-roundtrip-defaults-v1`;
+no se empuja a main para evitar desplegar el mismo runtime otra vez.
+Las secciones de preparación anteriores se conservan como historia.
+
+
 Puente 3.10.1. El clasificador se aloja en SICETAC-AL-INSTANTE y solo recibe el
 mensaje actual. El motor sigue en `https://sicetac-api-mcp.onrender.com`.
 No hay contexto nuevo ni cambios de cálculo, Meta, números o permisos privados.
