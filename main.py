@@ -16,12 +16,13 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 import requests
 from enterprise_rates import current_proof, set_proof, reset_proof, private_rates_message, link_command_message
+import decisions_pilot
 
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("atica-whatsapp")
 
-app = FastAPI(title="ATICA WhatsApp Bridge", version="3.9.1")
+app = FastAPI(title="ATICA WhatsApp Bridge", version="3.10.0")
 
 
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "aticatoken123")
@@ -2738,13 +2739,13 @@ def extract_gemini_response_text(data: dict) -> str | None:
 
 
 def should_try_gemini_route_fallback(user_text: str, analisis_busqueda: dict) -> bool:
-    if not GEMINI_API_KEY or not GEMINI_ENABLED:
+    if not GEMINI_API_KEY or not GEMINI_ENABLED or decisions_pilot.configured():
         return False
     return should_try_route_fallback(user_text, analisis_busqueda)
 
 
 def should_try_openai_route_fallback(user_text: str, analisis_busqueda: dict) -> bool:
-    if not OPENAI_API_KEY or not OPENAI_FALLBACK_ENABLED:
+    if not OPENAI_API_KEY or not OPENAI_FALLBACK_ENABLED or decisions_pilot.configured():
         return False
     return should_try_route_fallback(user_text, analisis_busqueda)
 
@@ -3007,7 +3008,7 @@ def generar_respuesta_ia(
     resultado_sicetac: dict | None,
     deterministic_reply: str,
 ) -> str | None:
-    if not OPENAI_API_KEY or not OPENAI_FALLBACK_ENABLED:
+    if not OPENAI_API_KEY or not OPENAI_FALLBACK_ENABLED or decisions_pilot.configured():
         return None
 
     context_payload = {
@@ -3370,11 +3371,13 @@ async def health():
         "version": app.version,
         "status": "running",
         "sicetac_api": SICETAC_API_BASE,
-        "openai_enabled": bool(OPENAI_API_KEY and OPENAI_FALLBACK_ENABLED),
+        "openai_enabled": bool(OPENAI_API_KEY and OPENAI_FALLBACK_ENABLED and not decisions_pilot.configured()),
         "openai_configured": bool(OPENAI_API_KEY),
         "openai_fallback_enabled": OPENAI_FALLBACK_ENABLED,
         "openai_model": OPENAI_MODEL if OPENAI_API_KEY else None,
-        "gemini_enabled": bool(GEMINI_API_KEY and GEMINI_ENABLED),
+        "gemini_enabled": bool(GEMINI_API_KEY and GEMINI_ENABLED and not decisions_pilot.configured()),
+        "decisions_pilot_configured": decisions_pilot.configured(),
+        "legacy_ai_fallback_suspended": decisions_pilot.configured(),
         "gemini_configured": bool(GEMINI_API_KEY),
         "gemini_model": GEMINI_MODEL if GEMINI_API_KEY else None,
         "lead_capture_enabled": bool(LEAD_CAPTURE_WEBHOOK_URL),
@@ -3808,6 +3811,16 @@ async def _process_whatsapp_payload(data: dict, wa_message_id: str | None = None
             }
         )
         return {"status": "body selector sent from text"}
+
+    # Optional Decisions pilot sees ONLY this message, never state/lead/contact.
+    # Fallback, budget exhaustion and provider errors continue through legacy.
+    decisions_plan = decisions_pilot.interpret(user_text, legacy_route_found=bool(parsear_ruta(user_text))) if decisions_pilot.configured() else None
+    if decisions_plan is not None:
+        return decisions_pilot.respond(
+            decisions_plan, query=consultar_sicetac, format_result=formatear_respuesta,
+            format_hours=formatear_valor_personalizado_por_horas, format_market=formatear_valor_plaza,
+            private_message=private_rates_message, proof=current_proof(),
+            send=send_whatsapp_message, recipient=recipient)
 
     if usuario_pide_viaje_redondo(user_text) and not usuario_pide_viaje_redondo_con_vacio(user_text):
         msg = (
