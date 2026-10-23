@@ -87,3 +87,29 @@ central de Instant para evitar otro despliegue solo documental de este puente.
 El resumen principal final tiene cuatro líneas: OD, configuración y carga con
 horas, valor SICETAC destacado y periodo/ID. Reutiliza el cálculo y formato COP
 existentes; si no hay importe, usa el formato de detalle sin inventar cero.
+
+
+## Candidato local 3.10.4 · 23 oct 2026 · sin publicar
+
+Rama `codex/decisions-roundtrip-defaults-v1`. Instant 0.4.16 acompaña esta
+actualización; producción permanece en Instant 0.4.15 / puente 3.10.3.
+Contrato propietario en SICETAC-AL-INSTANTE:
+`docs/DECISIONS-TRAMOS-MISMA-CONFIGURACION-2026-10-23.md`.
+
+Sin cambios expresos, el perfil del primer tramo se usa en los siguientes.
+Una cifra de horas aplica por tramo y se muestra en el resumen. La metadata
+solo se acepta tras validar que los parámetros compartidos coincidan. En ida
+y vuelta cargada con estado heredado se propone Regreso sin carga (H0), o
+Contenedor vacío (mantiene las horas y vehículo cargado). La alternativa solo
+se calcula al pulsarla; se conserva Ver otras variantes. No se suman variantes.
+
+Codec autosuficiente `sii:return:v1:…` con HMAC de dominio separado, clave
+existente, tipos/rangos y límites Meta. No guarda conversación. Handler antes
+de captura comercial; no clasifica de nuevo; prueba privada del webhook actual.
+No se cambió motor, Meta, credenciales, permisos ni presupuesto.
+
+84 pruebas PASS, solo fixtures y envíos simulados; el verificador bloqueó tres
+intentos bind/DNS preexistentes. No hubo llamadas pagadas ni envíos reales.
+Tests nuevos: `tests/test_stateless_return_options.py`.
+Pendiente publicar ambos candidatos y probar los botones en WhatsApp real.
+No empujar a main sin intención de desplegar: Render publica automáticamente.

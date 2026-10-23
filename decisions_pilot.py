@@ -62,11 +62,18 @@ def interpret(text,*,legacy_route_found,post=requests.post):
                 carroceria=body,modo_viaje=q['modo_viaje'],tipo_contenedor=container,
                 horas_logisticas=hours,mes=q.get('mes'),rutasid=q.get('rutasid'),
                 peso_carga_t=q.get('peso_carga_t')))
-        return {'status':'draft','queries':validated}
+        result={'status':'draft','queries':validated}
+        grounding=data.get('grounding')
+        if isinstance(grounding,dict) and grounding.get('return_inherited') is True and len(validated)>1:
+            shared=('vehiculo','carroceria','modo_viaje','tipo_contenedor','horas_logisticas','mes','peso_carga_t')
+            if all(all(q.get(k)==validated[0].get(k) for k in shared) for q in validated[1:]):
+                result['same_as_first']=True
+        return result
     except (requests.RequestException,ValueError,TypeError,KeyError):return None
 
 
 ACTION_PREFIX='sii:variants:v1:'
+RETURN_ACTION_PREFIX='sii:return:v1:'
 BODY_CODES={'E':'General - Estacas','F':'General - Furgon','P':'Portacontenedores'}
 
 
@@ -84,13 +91,13 @@ def action_query(values):
     if mode=='VACIO' and hours!=0:return None
     if type(month) is not int or not 200001<=month<=210012 or not 1<=month%100<=12:return None
     if weight is not None and (type(weight) not in (int,float) or not math.isfinite(weight) or not 0<weight<=60):return None
-    if container=='VACIO' and weight is not None:return None
+    if (container=='VACIO' or mode=='VACIO') and weight is not None:return None
     return dict(origen=origin,destino=destination,codigo_dane_origen=origin,codigo_dane_destino=destination,
         vehiculo=vehicle,carroceria=BODY_CODES[body],modo_viaje=mode,tipo_contenedor=container,
         horas_logisticas=hours,mes=month,peso_carga_t=weight)
 
 
-def variant_action(q,period):
+def signed_query_action(q,period,prefix):
     key=os.getenv('SICETAC_INSTANT_DECISIONS_BRIDGE_KEY','')
     body=next((k for k,v in BODY_CODES.items() if v==q.get('carroceria')),None)
     container=q.get('tipo_contenedor')
@@ -99,23 +106,48 @@ def variant_action(q,period):
         q.get('modo_viaje'),container,q.get('horas_logisticas'),period,q.get('peso_carga_t')]
     if not key or action_query(values) is None:return None
     payload=base64.urlsafe_b64encode(json.dumps(values,separators=(',',':'),allow_nan=False).encode()).decode().rstrip('=')
-    signature=hmac.new(key.encode(),(ACTION_PREFIX+payload).encode(),hashlib.sha256).hexdigest()[:24]
-    action=ACTION_PREFIX+payload+':'+signature
+    signature=hmac.new(key.encode(),(prefix+payload).encode(),hashlib.sha256).hexdigest()[:24]
+    action=prefix+payload+':'+signature
     return action if len(action)<=256 else None
 
 
-def decode_variant_action(text):
+def variant_action(q,period):
+    return signed_query_action(q,period,ACTION_PREFIX)
+
+
+def return_action(q,period):
+    # The alternative is calculated only on click; it does not change the trip.
+    if q.get('modo_viaje')!='CARGADO' or q.get('tipo_contenedor')=='VACIO':return None
+    alternate={**q,'peso_carga_t':None}
+    if q.get('carroceria')=='Portacontenedores':
+        alternate['tipo_contenedor']='VACIO'
+    else:
+        alternate.update(modo_viaje='VACIO',tipo_contenedor=None,horas_logisticas=0)
+    return signed_query_action(alternate,period,RETURN_ACTION_PREFIX)
+
+
+def decode_query_action(text,prefix):
     key=os.getenv('SICETAC_INSTANT_DECISIONS_BRIDGE_KEY','')
-    if not key or not isinstance(text,str) or not text.startswith(ACTION_PREFIX) or len(text)>256:return None
+    if not key or not isinstance(text,str) or not text.startswith(prefix) or len(text)>256:return None
     try:
-        payload,signature=text[len(ACTION_PREFIX):].split(':')
+        payload,signature=text[len(prefix):].split(':')
         if not re.fullmatch(r'[A-Za-z0-9_-]{1,220}',payload) or not re.fullmatch(r'[0-9a-f]{24}',signature):return None
-        expected=hmac.new(key.encode(),(ACTION_PREFIX+payload).encode(),hashlib.sha256).hexdigest()[:24]
+        expected=hmac.new(key.encode(),(prefix+payload).encode(),hashlib.sha256).hexdigest()[:24]
         if not hmac.compare_digest(signature,expected):return None
         values=json.loads(base64.urlsafe_b64decode(payload+'='*(-len(payload)%4)))
-        q=action_query(values)
-        return {'status':'draft','queries':[q],'view_all_variants':True} if q else None
+        return action_query(values)
     except (ValueError,TypeError):return None
+
+
+def decode_variant_action(text):
+    q=decode_query_action(text,ACTION_PREFIX)
+    return {'status':'draft','queries':[q],'view_all_variants':True} if q else None
+
+
+def decode_return_action(text):
+    q=decode_query_action(text,RETURN_ACTION_PREFIX)
+    if not q or not (q['modo_viaje']=='VACIO' or q['tipo_contenedor']=='VACIO'):return None
+    return {'status':'draft','queries':[q],'alternative_return':True}
 
 
 def selected_principal(result,q):
@@ -195,12 +227,25 @@ def respond(plan,*,query,format_result,format_hours,format_market,private_messag
             text=format_primary(row,q)
         if not text:text=reference_text(result,q,format_hours,principal=principal)
         if len(plan['queries'])>1:text=f'Tramo {index}/{len(plan["queries"])}\n'+text
+        if plan.get('same_as_first') and index==1:
+            text+='\nMisma configuración en todos los tramos · '+str(q['horas_logisticas']).removesuffix('.0')+' horas por tramo.'
+        if plan.get('alternative_return'):
+            text='Alternativa de regreso: '+('contenedor vacío transportado.' if q.get('tipo_contenedor')=='VACIO' else 'vehículo sin carga · H0.')+'\n'+text
+        buttons=[{'id':action,'title':'Ver otras variantes'}] if action else []
+        round_trip=(len(plan['queries'])==2 and
+            plan['queries'][0].get('codigo_dane_origen')==q.get('codigo_dane_destino') and
+            plan['queries'][0].get('codigo_dane_destino')==q.get('codigo_dane_origen'))
+        if send_buttons is not None and index==2 and round_trip and plan.get('same_as_first'):
+            alternate=return_action(q,result.get('mes'))
+            if alternate:
+                title='Contenedor vacío' if q.get('carroceria')=='Portacontenedores' else 'Regreso sin carga'
+                buttons.append({'id':alternate,'title':title})
         # Existing interactive sender accepts a 1024-character body.
-        if action and len(text)<=1024:
-            send_buttons(to=recipient,body=text,buttons=[{'id':action,'title':'Ver otras variantes'}])
+        if buttons and len(text)<=1024:
+            send_buttons(to=recipient,body=text,buttons=buttons)
         else:
             send_parts(send,recipient,text)
-            if action:send_buttons(to=recipient,body='Consulta otras variantes de este tramo.',buttons=[{'id':action,'title':'Ver otras variantes'}])
+            if buttons:send_buttons(to=recipient,body='Opciones de este tramo: se calculan al elegirlas.',buttons=buttons)
         market=format_market(result)
         if market:send(to=recipient,body=market)
         private_result=result

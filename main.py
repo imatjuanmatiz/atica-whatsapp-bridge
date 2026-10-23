@@ -22,7 +22,7 @@ import decisions_pilot
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("atica-whatsapp")
 
-app = FastAPI(title="ATICA WhatsApp Bridge", version="3.10.3")
+app = FastAPI(title="ATICA WhatsApp Bridge", version="3.10.4")
 
 
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "aticatoken123")
@@ -3539,10 +3539,11 @@ async def _process_whatsapp_payload(data: dict, wa_message_id: str | None = None
             return {"status": "WhatsApp linking command handled"}
         # The signed button contains a full public query. No conversation state,
         # commercial capture or Decisions call is needed, even after a restart.
-        if user_text.startswith(decisions_pilot.ACTION_PREFIX):
-            action=decisions_pilot.decode_variant_action(user_text)
+        if user_text.startswith((decisions_pilot.ACTION_PREFIX,decisions_pilot.RETURN_ACTION_PREFIX)):
+            is_return=user_text.startswith(decisions_pilot.RETURN_ACTION_PREFIX)
+            action=(decisions_pilot.decode_return_action(user_text) if is_return else decisions_pilot.decode_variant_action(user_text))
             if action is None:
-                send_whatsapp_message(to=recipient,body="Este acceso a variantes ya no está disponible. Escribe de nuevo la ruta completa, vehículo y horas.")
+                send_whatsapp_message(to=recipient,body="Esta opción ya no está disponible. Escribe de nuevo la ruta completa, vehículo y horas.")
                 return {"status":"invalid variants action"}
             return respond_decisions_plan(action,recipient)
         merge_lead_data(state, profile_name, user_text)
