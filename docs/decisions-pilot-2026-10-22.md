@@ -19,8 +19,10 @@ migración están en el repositorio dueño:
 
 60 pruebas del puente pasan en modo sin red y con envíos simulados; 3 intentos
 bind/DNS de fixtures previos fueron bloqueados. Esto no equivale a una
-conversación humana de WhatsApp. El resultado de publicación se añadirá tras
-verificar estado live y salud del commit exacto.
+conversación humana de WhatsApp. El recibo operativo central está en el handoff del repositorio propietario de
+Instant, enlazado arriba. Código 4c0fc3b publicado como
+`dep-dbdcduu1egvs738h8ecg`, live; salud 3.10.1 con piloto configurado y
+fallbacks externos previos suspendidos.
 
 La reproducción sintética HTTP encontró que varias rutas tienen alternativas.
 La presentación del piloto ahora conserva cada variante con su ID, periodo y
@@ -28,3 +30,20 @@ valor para las horas solicitadas; no selecciona la primera ni suma alternativas.
 Los mensajes se dividen antes del límite de WhatsApp para evitar truncarlos.
 Se mantiene el rechazo de vehículo vacío cuando falta referencia VACIO oficial.
 Las tres regresiones nuevas validan variantes H6, división íntegra y estado vacío.
+
+## Aceptación publicada
+
+Instant 0.4.15, commit f855196, despliegue
+`dpl_FE36SrgxSLFZtudSNmUMzQjXYMkq`, Ready y promovido al dominio canónico.
+Cuatro consultas sintéticas publicadas produjeron planes correctos y siete
+tramos consultaron el motor real. Se repitió únicamente el caso del contenedor
+para verificar su formato: todas las variantes conservadas, sin sumar importes.
+Con el interruptor de la base realmente apagado, el webhook local volvió al
+parser y obtuvo respuesta 200 del motor, con envíos y captura comercial simulados.
+El contador no cambió durante ese apagado.
+
+El titular autorizó la activación final: USD 5 totales, sin recarga automática.
+El control leído al activarlo registraba USD 0,0016837 en siete intentos sintéticos
+liquidados y cero pendientes. No se enviaron mensajes a contactos reales.
+Queda pendiente la comprobación humana de ida y vuelta en WhatsApp; la salud
+y los replays HTTP no la sustituyen. Este commit solo registra el recibo.

@@ -1,0 +1,14 @@
+{
+  "tests": 60,
+  "successful": true,
+  "errors": 0,
+  "failures": 0,
+  "blocked_network_attempts": [
+    "socket.bind",
+    "socket.getaddrinfo",
+    "socket.getaddrinfo"
+  ],
+  "real_network_permitted": false,
+  "whatsapp_sends": "mocked",
+  "fixture": "synthetic_only"
+}
