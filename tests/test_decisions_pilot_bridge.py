@@ -83,3 +83,35 @@ class BridgeDecisionsTests(unittest.TestCase):
             self.assertFalse(main.should_try_openai_route_fallback(TEXT,{}))
             self.assertFalse(main.should_try_gemini_route_fallback(TEXT,{}))
             self.assertIsNone(main.generar_respuesta_ia(phone='qa',profile_name=None,user_text=TEXT,state={},ruta=None,resultado_sicetac=None,deterministic_reply='fixture'))
+
+
+class BridgePresentationTests(unittest.TestCase):
+    def test_every_variant_keeps_its_own_h6_value_with_no_extra_engine_call(self):
+        plan={'status':'draft','queries':[dict(origen='A',destino='B',vehiculo='C3S3',carroceria='General - Estacas',modo_viaje='CARGADO',horas_logisticas=6)]}
+        result={'mes':202610,'totales':{'H6':99999},'variantes':[
+            {'ID_SICE':901,'NOMBRE_SICE':'Vía A','totales':{'H6':1600}},
+            {'ID_SICE':902,'NOMBRE_SICE':'Vía B','totales':{'H6':2600}}]}
+        before=copy.deepcopy(result)
+        query=Mock(return_value=result);send=Mock()
+        formatter=Mock(side_effect=lambda **kw:'H6 '+str(kw['resultado']['totales'].get('H6')))
+        d.respond(plan,query=query,format_result=Mock(),format_hours=formatter,format_market=lambda _:None,
+            private_message=lambda **_:None,proof=None,send=send,recipient='fixture')
+        text=''.join(c.kwargs['body'] for c in send.call_args_list)
+        self.assertIn('901',text);self.assertIn('902',text)
+        self.assertIn('1600',text);self.assertIn('2600',text);self.assertNotIn('99999',text)
+        self.assertIn('Periodo: 202610',text)
+        self.assertEqual(query.call_count,1);self.assertEqual(formatter.call_count,2)
+        self.assertEqual(result,before)
+
+    def test_splitting_does_not_truncate_any_variant(self):
+        send=Mock();text=('Variante A\n'+'x'*3790+'\n')*4
+        d.send_parts(send,'fixture',text)
+        self.assertEqual(''.join(c.kwargs['body'] for c in send.call_args_list),text)
+        self.assertTrue(all(len(c.kwargs['body'])<=3800 for c in send.call_args_list))
+
+    def test_missing_official_empty_value_is_not_presented_as_loaded(self):
+        plan={'status':'draft','queries':[dict(vehiculo='C3S3',carroceria='General - Estacas',modo_viaje='VACIO',horas_logisticas=0)]}
+        formatter=Mock();send=Mock()
+        r=d.respond(plan,query=lambda **_:{'metodo':'lookup_cargado','totales':{'H4':1000}},format_result=Mock(),
+            format_hours=formatter,format_market=lambda _:None,private_message=lambda **_:None,proof=None,send=send,recipient='fixture')
+        self.assertEqual(r['status'],'decisions unavailable');formatter.assert_not_called()

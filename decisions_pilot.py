@@ -61,6 +61,42 @@ def interpret(text,*,legacy_route_found,post=requests.post):
     except (requests.RequestException,ValueError,TypeError,KeyError):return None
 
 
+def send_parts(send,recipient,text):
+    # The existing sender truncates at 4096. Keep every variant without truncation.
+    remaining=text
+    while remaining:
+        if len(remaining)<=3800:
+            send(to=recipient,body=remaining);return
+        cut=remaining.rfind('\n',0,3800)
+        if cut<1:cut=3800
+        send(to=recipient,body=remaining[:cut])
+        remaining=remaining[cut:]
+
+
+def reference_text(result,q,format_hours):
+    parts=[f"Carrocería: {q['carroceria']}",f"Modo: {q['modo_viaje']}"]
+    if q.get('tipo_contenedor'):parts.append(f"Contenedor: {q['tipo_contenedor']}")
+    if result.get('mes'):parts.append(f"Periodo: {result['mes']}")
+    if result.get('estimado'):parts.append('VALOR ESTIMADO: no es una referencia de ruta publicada.')
+    variants=result.get('variantes') or []
+    rows=variants or [None]
+    if len(rows)>1:parts.append(f"Variantes disponibles: {len(rows)}; no se seleccionó una automáticamente.")
+    for variant in rows:
+        row={k:v for k,v in result.items() if k!='variantes'}
+        if variant:
+            row.update(variant)
+            # A variant without its own totals cannot inherit another route's price.
+            row['totales']=variant.get('totales',{})
+            label=str(variant.get('NOMBRE_SICE') or 'Ruta publicada')
+            rid=variant.get('ID_SICE') or variant.get('RUTASID')
+            if rid:label+=f" (ID {rid})"
+            parts.append(label)
+        parts.append(format_hours(resultado=row,horas=q['horas_logisticas'],vehiculo=q['vehiculo'],
+            toneladas=q.get('peso_carga_t'),incluir_por_tonelada=False,include_closing=False))
+    parts.append('Escribe otra consulta con la ruta completa, vehículo y horas.')
+    return '\n'.join(parts)
+
+
 def respond(plan,*,query,format_result,format_hours,format_market,private_message,proof,send,recipient):
     """All queries validated first. Execute each leg once; never save last_route."""
     if plan['status']=='clarify':
@@ -75,10 +111,12 @@ def respond(plan,*,query,format_result,format_hours,format_market,private_messag
         if not isinstance(result,dict) or result.get('_error'):
             send(to=recipient,body=format_result(result or {}))
             return {'status':'decisions unavailable','completed_legs':index-1}
-        text=format_hours(resultado=result,horas=q['horas_logisticas'],vehiculo=q['vehiculo'],
-            toneladas=q.get('peso_carga_t'),incluir_por_tonelada=False)
+        if q['modo_viaje']=='VACIO' and result.get('metodo')!='lookup_vacio_oficial' and not result.get('estimado'):
+            send(to=recipient,body='No hay una referencia oficial de vehículo vacío para este tramo y carrocería.')
+            return {'status':'decisions unavailable','completed_legs':index-1}
+        text=reference_text(result,q,format_hours)
         if len(plan['queries'])>1:text=f'Tramo {index}/{len(plan["queries"])}\n'+text
-        send(to=recipient,body=text)
+        send_parts(send,recipient,text)
         market=format_market(result)
         if market:send(to=recipient,body=market)
         private=private_message(proof=proof,result=result,route=q,vehicle=q['vehiculo'],body=q['carroceria'],

@@ -22,7 +22,7 @@ import decisions_pilot
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("atica-whatsapp")
 
-app = FastAPI(title="ATICA WhatsApp Bridge", version="3.10.0")
+app = FastAPI(title="ATICA WhatsApp Bridge", version="3.10.1")
 
 
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "aticatoken123")
@@ -2651,6 +2651,7 @@ def formatear_valor_personalizado_por_horas(
     vehiculo: str,
     toneladas: float | None = None,
     incluir_por_tonelada: bool = False,
+    include_closing: bool = True,
 ) -> str:
     total = calcular_total_para_horas(resultado, horas)
     if total is None:
@@ -2673,8 +2674,9 @@ def formatear_valor_personalizado_por_horas(
         if toneladas_base:
             valor_ton = total / toneladas_base
             lineas.append(f"Valor por tonelada: {fmt_cop(valor_ton)}/tn usando {fmt_decimal(toneladas_base)} t")
-    lineas.append("")
-    lineas.append("Escribe otra ruta asi: origen a destino.")
+    if include_closing:
+        lineas.append("")
+        lineas.append("Escribe otra ruta asi: origen a destino.")
     return "\n".join(lineas)
 
 
