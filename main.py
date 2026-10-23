@@ -22,7 +22,7 @@ import decisions_pilot
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("atica-whatsapp")
 
-app = FastAPI(title="ATICA WhatsApp Bridge", version="3.10.2")
+app = FastAPI(title="ATICA WhatsApp Bridge", version="3.10.3")
 
 
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "aticatoken123")
@@ -3470,12 +3470,31 @@ def finish_whatsapp_message(
         return False
 
 
+def formatear_principal_sicetac(resultado,consulta):
+    total=calcular_total_para_horas(resultado,consulta['horas_logisticas'])
+    if total is None:return None
+    origin=quitar_tildes(resultado.get('origen') or consulta['origen'])
+    destination=quitar_tildes(resultado.get('destino') or consulta['destino'])
+    body=consulta['carroceria']
+    if body=='Portacontenedores':
+        body='Contenedor vacío' if consulta.get('tipo_contenedor')=='VACIO' else 'Contenedor cargado'
+    elif consulta.get('modo_viaje')=='VACIO':body+=' · Vehículo vacío'
+    hours=fmt_decimal(consulta['horas_logisticas'])
+    rid=resultado.get('ID_SICE') or resultado.get('RUTASID') or resultado.get('rutasid')
+    label='Ruta seleccionada' if consulta.get('rutasid') else 'Ruta principal'
+    if rid:label+=f" · ID {rid}"
+    period=resultado.get('mes')
+    if period:label=f"Periodo: {period} · "+label
+    return f"*{origin} → {destination}*\n{consulta['vehiculo']} · {body} · {hours} horas\n*Valor SICETAC: {fmt_cop(total)}*\n{label}"
+
+
 def respond_decisions_plan(plan,recipient):
     return decisions_pilot.respond(
         plan, query=consultar_sicetac, format_result=formatear_respuesta,
         format_hours=formatear_valor_personalizado_por_horas, format_market=formatear_valor_plaza,
         private_message=private_rates_message, proof=current_proof(),
-        send=send_whatsapp_message, recipient=recipient, send_buttons=send_whatsapp_buttons)
+        send=send_whatsapp_message, recipient=recipient, send_buttons=send_whatsapp_buttons,
+        format_primary=formatear_principal_sicetac)
 
 
 async def _process_whatsapp_payload(data: dict, wa_message_id: str | None = None):

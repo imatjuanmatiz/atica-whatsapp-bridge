@@ -49,7 +49,7 @@ Queda pendiente la comprobación humana de ida y vuelta en WhatsApp; la salud
 y los replays HTTP no la sustituyen. Este commit solo registra el recibo.
 
 
-## Principal primero y variantes bajo demanda · 3.10.2
+## Principal primero y variantes bajo demanda · 3.10.3
 
 Juan aprobó mostrar solo la principal de cada tramo y ofrecer «Ver otras
 variantes». El puente respeta `seleccion_variante.rutasid_principal` publicado por
@@ -77,9 +77,13 @@ vacío transportado y H6 no cambian entre ida y regreso; no se mezclan sus boton
 No se cambiaron algoritmos, motor, presupuesto o permisos. El alcance de esta
 presentación es el flujo del piloto; el parser clásico conserva su flujo previo.
 
-Verificación: 72 pruebas del puente en modo sin red y envíos simulados. El replay
+Verificación: 74 pruebas del puente en modo sin red y envíos simulados. El replay
 con datos publicados confirmó las principales 154 / 95, los valores H6
 $3.217.526 / $2.676.872 y la expansión a cuatro variantes por sentido después de
 vaciar el estado local. Cero llamadas Decisions y cero envíos Meta en el replay.
 El recibo desplegado y el pendiente humano del botón se registran en el handoff
 central de Instant para evitar otro despliegue solo documental de este puente.
+
+El resumen principal final tiene cuatro líneas: OD, configuración y carga con
+horas, valor SICETAC destacado y periodo/ID. Reutiliza el cálculo y formato COP
+existentes; si no hay importe, usa el formato de detalle sin inventar cero.

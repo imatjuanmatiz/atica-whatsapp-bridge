@@ -165,7 +165,7 @@ def reference_text(result,q,format_hours,*,principal=None):
     return '\n'.join(parts)
 
 
-def respond(plan,*,query,format_result,format_hours,format_market,private_message,proof,send,recipient,send_buttons=None):
+def respond(plan,*,query,format_result,format_hours,format_market,private_message,proof,send,recipient,send_buttons=None,format_primary=None):
     """All queries validated first. Execute each leg once; never save last_route."""
     if plan['status']=='clarify':
         send(to=recipient,body='Para consultar esta solicitud:\n'+'\n'.join(plan['questions']))
@@ -188,7 +188,12 @@ def respond(plan,*,query,format_result,format_hours,format_market,private_messag
             if principal is not None and len(result.get('variantes') or [])>1:
                 action=variant_action(q,result.get('mes')) if send_buttons is not None else None
                 if action is None:principal=None  # Preserve access to every alternative.
-        text=reference_text(result,q,format_hours,principal=principal)
+        text=None
+        if principal is not None and format_primary is not None:
+            row={k:v for k,v in result.items() if k!='variantes'}
+            row.update(principal);row['totales']=principal.get('totales',{})
+            text=format_primary(row,q)
+        if not text:text=reference_text(result,q,format_hours,principal=principal)
         if len(plan['queries'])>1:text=f'Tramo {index}/{len(plan["queries"])}\n'+text
         # Existing interactive sender accepts a 1024-character body.
         if action and len(text)<=1024:

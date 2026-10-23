@@ -137,3 +137,19 @@ class StatelessVariantTests(unittest.TestCase):
         with patch.dict(os.environ,KEY),patch.object(main,'send_whatsapp_message') as send,patch.object(main,'consultar_sicetac') as query,patch.object(d,'interpret') as classifier:
             result=asyncio.run(main._process_whatsapp_payload(payload))
         self.assertEqual(result['status'],'invalid variants action');send.assert_called_once();query.assert_not_called();classifier.assert_not_called()
+
+
+class CompactPrimaryTests(unittest.TestCase):
+    def test_primary_summary_preserves_h6_value_period_id_and_container_state(self):
+        data={'origen':'Buenaventura','destino':'Bogota','mes':202610,'ID_SICE':154,'totales':{'H6':3217526}}
+        text=main.formatear_principal_sicetac(data,QUERY)
+        self.assertIn('*Valor SICETAC: $3.217.526*',text)
+        self.assertIn('C2S2 · Contenedor cargado · 6 horas',text)
+        self.assertIn('Periodo: 202610 · Ruta principal · ID 154',text)
+        self.assertEqual(len(text.splitlines()),4)
+        empty={**QUERY,'tipo_contenedor':'VACIO','peso_carga_t':None}
+        self.assertIn('Contenedor vacío',main.formatear_principal_sicetac(data,empty))
+        self.assertLessEqual(len(text),1024)
+
+    def test_missing_amount_uses_detailed_fallback_instead_of_showing_zero(self):
+        self.assertIsNone(main.formatear_principal_sicetac({'totales':{}},QUERY))
